@@ -1,0 +1,5 @@
+name: example_campaign
+description: Reference layout shipped with hunch_kit (documentation only)
+default_provider: echo
+default_rubric: example_minimal
+providers_path: providers

@@ -17,8 +17,8 @@ A task-specific tool (_promptForge) was built first, wrapping the NotebookLM MCP
 ```
 hunch_kit/
 ├── hunch_kit/                     # Python package
-│   ├── __init__.py
 │   ├── cli.py                     # CLI entry point
+│   ├── project.py                 # Campaign config + root discovery
 │   ├── manifest.py                # Experiment manifest schema + I/O
 │   ├── runner.py                  # Experiment execution orchestrator
 │   ├── evaluation/
@@ -27,8 +27,7 @@ hunch_kit/
 │   └── providers/
 │       ├── base.py                # Provider interface (abstract)
 │       └── echo.py                # Reference provider for testing
-├── rubrics/                       # Evaluation rubric templates
-├── experiments/                   # Experiment runs (one folder per run)
+├── examples/campaign/             # Reference campaign (rubrics, experiments, providers)
 ├── pyproject.toml
 └── README.md
 ```

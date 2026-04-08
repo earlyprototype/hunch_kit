@@ -224,3 +224,28 @@ button[type="submit"]:hover { background: var(--accent-hover); }
   font-size: 0.85rem;
   color: var(--success);
 }
+
+/* Error page */
+.error-page {
+  text-align: center;
+  padding: 4rem 1rem;
+}
+.error-page h1 {
+  font-size: 4rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+.error-page p {
+  font-size: 1.15rem;
+  color: var(--text-muted);
+  margin-bottom: 2rem;
+}
+.error-page a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+.error-page a:hover {
+  text-decoration: underline;
+}

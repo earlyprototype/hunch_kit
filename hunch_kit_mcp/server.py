@@ -7,23 +7,11 @@ tools (real operations), resources (read-only data), and prompts
 
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
 from mcp.server.fastmcp import FastMCP
 
 from .tools import register_tools
 from .resources import register_resources
 from .prompts import register_prompts
-
-
-def get_workspace() -> Path:
-    """Resolve the hunch_kit project root."""
-    env = os.getenv("HUNCH_KIT_WORKSPACE")
-    if env:
-        return Path(env)
-    return Path.cwd()
 
 
 mcp = FastMCP(

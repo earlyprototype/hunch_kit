@@ -7,19 +7,37 @@ rubric dimensions.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from ..manifest import Manifest, find_experiments, load_all_manifests
+from ..manifest import Manifest, load_all_manifests
 from ..rubric import Rubric, load_rubric_by_name
 
 
 STATIC_DIR = Path(__file__).parent / "static"
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+STATUS_CLASSES = {
+    "success": "status-success",
+    "failed": "status-failed",
+    "pending": "status-pending",
+    "running": "status-running",
+}
+
+
+def _create_jinja_env() -> Environment:
+    """Build the Jinja2 environment with auto-escaping."""
+    return Environment(
+        loader=FileSystemLoader(str(TEMPLATES_DIR)),
+        autoescape=select_autoescape(["html"]),
+    )
 
 
 def create_app(
@@ -31,6 +49,8 @@ def create_app(
 
     app = FastAPI(title="hunch_kit evaluation")
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    jinja_env = _create_jinja_env()
 
     # Stash config on the app for route access
     app.state.experiments_dir = Path(experiments_dir)
@@ -47,39 +67,11 @@ def create_app(
             if len(manifests) == 1:
                 return RedirectResponse(f"/eval/{manifests[0].id}")
 
-        rows = ""
-        for m in manifests:
-            status_class = {
-                "success": "status-success",
-                "failed": "status-failed",
-                "pending": "status-pending",
-                "running": "status-running",
-            }.get(m.status, "")
-            scored = "Yes" if m.human_scores else "—"
-            rows += (
-                f'<tr>'
-                f'<td><a href="/eval/{m.id}">{m.id}</a></td>'
-                f'<td class="{status_class}">{m.status}</td>'
-                f'<td>{m.baseline or "—"}</td>'
-                f'<td>{m.overall_preference or "—"}</td>'
-                f'<td>{scored}</td>'
-                f'</tr>\n'
-            )
-
-        html = _page(
-            "Experiments",
-            f"""
-            <h1>hunch_kit — Experiments</h1>
-            <table>
-              <thead>
-                <tr>
-                  <th>ID</th><th>Status</th><th>Baseline</th>
-                  <th>Preference</th><th>Scored</th>
-                </tr>
-              </thead>
-              <tbody>{rows}</tbody>
-            </table>
-            """,
+        template = jinja_env.get_template("index.html")
+        html = template.render(
+            title="Experiments",
+            manifests=manifests,
+            status_classes=STATUS_CLASSES,
         )
         return HTMLResponse(html)
 
@@ -87,7 +79,16 @@ def create_app(
     async def eval_page(experiment_id: str) -> HTMLResponse:
         exp_dir = app.state.experiments_dir / experiment_id
         if not exp_dir.exists():
-            return HTMLResponse("<h1>Experiment not found</h1>", status_code=404)
+            logger.warning("Experiment not found: %s", experiment_id)
+            error_template = jinja_env.get_template("error.html")
+            return HTMLResponse(
+                error_template.render(
+                    title="Not Found",
+                    code=404,
+                    message=f"Experiment '{experiment_id}' not found.",
+                ),
+                status_code=404,
+            )
 
         manifest = Manifest.load(exp_dir)
         rubric = _load_rubric_for(manifest, app.state.rubrics_dir)
@@ -100,59 +101,27 @@ def create_app(
             if baseline_dir.exists():
                 baseline_manifest = Manifest.load(baseline_dir)
                 baseline_output = _read_output(baseline_dir, baseline_manifest)
-                baseline_meta = _render_meta(baseline_manifest)
+                baseline_meta = _format_meta(baseline_manifest)
 
-        scoring_form = _build_scoring_form(manifest, rubric)
+        # Prepare scoring data
+        dimensions = rubric.human_dimensions() if rubric else []
+        dim_names = {d.name for d in dimensions}
+        extra_scores = {
+            k: v for k, v in manifest.human_scores.items()
+            if k not in dim_names
+        }
 
-        html = _page(
-            f"Evaluate: {experiment_id}",
-            f"""
-            <h1>Evaluate: {experiment_id}</h1>
-            <div class="meta-bar">
-              <span><strong>Hypothesis:</strong> {manifest.hypothesis}</span>
-              <span><strong>Variable:</strong> {manifest.variable_changed} = {manifest.variable_value}</span>
-              <span><strong>Status:</strong> {manifest.status}</span>
-            </div>
-
-            <div class="comparison">
-              <div class="panel">
-                <h2>Baseline{' — ' + manifest.baseline if manifest.baseline else ' — (none)'}</h2>
-                {baseline_meta}
-                <div class="output-box">
-                  {'<pre>' + _escape(baseline_output) + '</pre>' if baseline_output else '<p class="empty">No baseline output available</p>'}
-                </div>
-              </div>
-              <div class="panel">
-                <h2>Current — {experiment_id}</h2>
-                {_render_meta(manifest)}
-                <div class="output-box">
-                  {'<pre>' + _escape(current_output) + '</pre>' if current_output else '<p class="empty">No output yet — run the experiment first</p>'}
-                </div>
-              </div>
-            </div>
-
-            <div class="scoring-section">
-              <h2>Scoring</h2>
-              <form id="scoring-form" data-experiment-id="{experiment_id}">
-                {scoring_form}
-                <div class="form-row">
-                  <label for="overall_preference">Overall preference vs baseline</label>
-                  <select id="overall_preference" name="overall_preference">
-                    <option value="">— select —</option>
-                    <option value="better"{'selected' if manifest.overall_preference == 'better' else ''}>Better</option>
-                    <option value="equivalent"{'selected' if manifest.overall_preference == 'equivalent' else ''}>Equivalent</option>
-                    <option value="worse"{'selected' if manifest.overall_preference == 'worse' else ''}>Worse</option>
-                  </select>
-                </div>
-                <div class="form-row">
-                  <label for="notes">Notes</label>
-                  <textarea id="notes" name="notes" rows="3">{_escape(manifest.notes)}</textarea>
-                </div>
-                <button type="submit">Save scores</button>
-                <span id="save-status"></span>
-              </form>
-            </div>
-            """,
+        template = jinja_env.get_template("eval.html")
+        html = template.render(
+            title=f"Evaluate: {experiment_id}",
+            experiment_id=experiment_id,
+            manifest=manifest,
+            current_output=current_output,
+            current_meta=_format_meta(manifest),
+            baseline_output=baseline_output,
+            baseline_meta=baseline_meta,
+            dimensions=dimensions,
+            extra_scores=extra_scores,
         )
         return HTMLResponse(html)
 
@@ -206,78 +175,11 @@ def _read_output(exp_dir: Path, manifest: Manifest) -> str:
     return ""
 
 
-def _render_meta(manifest: Manifest) -> str:
+def _format_meta(manifest: Manifest) -> str:
+    """Build a short metadata string for display."""
     parts = []
     if manifest.duration_seconds is not None:
         parts.append(f"Duration: {manifest.duration_seconds:.1f}s")
     if manifest.provider:
         parts.append(f"Provider: {manifest.provider}")
-    if not parts:
-        return ""
-    return '<div class="meta-small">' + " · ".join(parts) + "</div>"
-
-
-def _build_scoring_form(manifest: Manifest, rubric: Rubric | None) -> str:
-    if rubric:
-        dims = rubric.human_dimensions()
-    else:
-        dims = []
-
-    if not dims and not manifest.human_scores:
-        return '<p class="empty">No rubric assigned — scores can still be recorded as free-form fields below.</p>'
-
-    rows = ""
-    for dim in dims:
-        current = manifest.human_scores.get(dim.name, "")
-        anchor_text = ""
-        if dim.anchors:
-            anchor_items = " · ".join(
-                f"<strong>{k}</strong>: {v}" for k, v in sorted(dim.anchors.items())
-            )
-            anchor_text = f'<div class="anchors">{anchor_items}</div>'
-
-        rows += f"""
-        <div class="form-row">
-          <label for="score_{dim.name}">{dim.name}</label>
-          <div class="dim-desc">{dim.description}</div>
-          {anchor_text}
-          <input type="range" id="score_{dim.name}" name="{dim.name}"
-                 min="{dim.scale_min}" max="{dim.scale_max}"
-                 value="{current or dim.scale_min}"
-                 oninput="document.getElementById('val_{dim.name}').textContent=this.value">
-          <span id="val_{dim.name}" class="range-val">{current or dim.scale_min}</span>
-        </div>
-        """
-
-    for key, val in manifest.human_scores.items():
-        if rubric and any(d.name == key for d in dims):
-            continue
-        rows += f"""
-        <div class="form-row">
-          <label for="score_{key}">{key}</label>
-          <input type="number" id="score_{key}" name="{key}" value="{val}" step="0.1">
-        </div>
-        """
-
-    return rows
-
-
-def _escape(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _page(title: str, body: str) -> str:
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title} — hunch_kit</title>
-  <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-  <nav><a href="/">hunch_kit</a></nav>
-  <main>{body}</main>
-  <script src="/static/app.js"></script>
-</body>
-</html>"""
+    return " · ".join(parts)

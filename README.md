@@ -1,18 +1,189 @@
 # hunch_kit
 
-Structured experimentation for iterative creative workflows. Test your hunches.
+You changed three things at once. The output got worse. Now you can't tell which change broke it.
 
-## What It Is
+**hunch_kit** is a local-first experiment framework for creative workflows where you need to *isolate variables*, *track lineage*, and *score outputs that require human eyes* — slide decks, generated images, prompt compositions, PDFs, design systems.
 
-A standalone, provider-agnostic experiment framework with human-in-the-loop evaluation. No external tool dependencies beyond Python. A local web UI for side-by-side comparison and scoring. An MCP server for AI-assisted experiment management.
+One hunch. One variable. One comparison. Repeat until you actually know what works.
 
-hunch_kit imposes just enough structure to keep experiments honest — hypothesis declaration, single-variable isolation, baseline lineage — without the overhead of platforms designed for programmatic LLM API pipelines.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/licence-MIT-green.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-61%20passed-brightgreen.svg)]()
 
-## Why It Exists
+---
 
-Existing experiment tracking tools (Promptfoo, Langfuse, Agenta, MLflow) are architecturally oriented toward programmatic LLM API interaction. None provide a lightweight, provider-agnostic framework with native human-in-the-loop evaluation for creative workflows that produce outputs requiring visual or subjective judgement — PDFs, images, slide decks, design compositions.
+## 30-Second Demo
 
-hunch_kit fills that gap.
+```bash
+# Scaffold a campaign
+hunch init-project ./my_campaign --name "slide_styles"
+cd my_campaign
+
+# Create your baseline experiment
+hunch init --id ex_001_baseline \
+    --hypothesis "Default styling produces acceptable slides" \
+    --variable "style_template" --value "default"
+
+# Drop your input file into the experiment directory, then run it
+hunch run ex_001_baseline
+
+# Branch: test a hunch
+hunch init --id ex_002_dark_mode \
+    --hypothesis "Dark mode improves visual hierarchy" \
+    --variable "style_template" --value "dark_professional" \
+    --baseline ex_001_baseline
+
+hunch run ex_002_dark_mode
+
+# Open the evaluation UI — compare side-by-side, score with your rubric
+hunch eval
+
+# See the family tree
+hunch lineage
+# root
+# └── ex_001_baseline
+#     └── ex_002_dark_mode
+```
+
+---
+
+## Why This Exists
+
+Existing experiment tracking tools — Promptfoo, Langfuse, Agenta, MLflow — are built for programmatic LLM API pipelines. They assume your outputs are text strings you can diff, and your evaluation is automated scoring against assertions.
+
+That doesn't work when:
+- **Your output is visual** — a PDF, a slide deck, an image, a design composition
+- **Your evaluation is subjective** — "does this *feel* better?" requires human eyes
+- **Your backend isn't an LLM API** — it's a rendering pipeline, a style system, a build tool
+
+hunch_kit fills that gap: structured experimentation with human-in-the-loop evaluation, for any input→output workflow.
+
+---
+
+## Installation
+
+```bash
+pip install -e .
+```
+
+With MCP server support (for AI-assisted experiment planning):
+
+```bash
+pip install -e ".[mcp]"
+```
+
+---
+
+## Core Concepts
+
+### Experiments start with hypotheses
+
+Every experiment declares **one hypothesis**, **one variable being changed**, and its **baseline** (parent). The manifest schema enforces single-variable isolation — no more "I changed the font *and* the colours *and* the spacing."
+
+### Pluggable providers
+
+A provider is anything that takes an input and produces an output. Text generators, slide deck builders, image pipelines, style evaluators — implement `run(input, config) → result` and you're done.
+
+### Human-first evaluation
+
+A local web UI presents outputs side-by-side for scoring against rubric dimensions. Configurable scales with calibration anchors ("1 = Unusable, 5 = Acceptable, 10 = Exceptional"). Scores write directly back to the experiment manifest.
+
+### Experiment lineage
+
+Every experiment knows its parent. Over time this builds a genealogy — a traceable path from initial hunch to validated output. No more "wait, which version was the good one?"
+
+### Local-first
+
+No cloud. No accounts. No data leaves your machine. Everything is YAML files on disk.
+
+---
+
+## Campaign Structure
+
+Work is organised in **campaigns** — a directory containing `hunch_project.yaml` at the root:
+
+```
+my_campaign/
+├── hunch_project.yaml          # Campaign config (defaults, provider, rubric)
+├── experiments/
+│   ├── ex_001_baseline/
+│   │   ├── experiment.yaml     # ← the manifest (single source of truth)
+│   │   ├── input.txt           # your input
+│   │   └── output/             # provider output
+│   └── ex_002_dark_mode/
+│       ├── experiment.yaml
+│       └── output/
+├── rubrics/
+│   └── slide_quality.yaml      # scoring dimensions + anchors
+└── providers/                  # optional campaign-local providers
+    └── my_backend.py           # auto-discovered, overrides built-ins
+```
+
+**Campaign resolution:** the CLI and MCP server find your campaign root by:
+1. `--root /path/to/campaign` (explicit)
+2. `HUNCH_KIT_WORKSPACE` environment variable
+3. Walk upward from `cwd` looking for `hunch_project.yaml`
+4. Fall back to current working directory
+
+A reference layout lives in `examples/campaign/`.
+
+---
+
+## Writing a Provider
+
+```python
+from hunch_kit.providers.base import BaseProvider, ProviderResult
+
+class MyProvider(BaseProvider):
+    name = "my_backend"
+
+    def run(self, input_text, config=None):
+        output = your_pipeline(input_text, config)
+        return ProviderResult(
+            output=output,
+            status="success",
+            metadata={"model": "v2"},
+        )
+```
+
+**Campaign-local:** drop the file in `<campaign>/providers/`. It's discovered by `name` at runtime and overrides any built-in with the same name.
+
+**Programmatic:** register directly in application code:
+
+```python
+from hunch_kit.runner import register_provider
+register_provider(MyProvider)
+```
+
+---
+
+## MCP Server
+
+hunch_kit ships an MCP server for AI-assisted experiment management. Three capability types:
+
+| Type | Description |
+|------|-------------|
+| **Tools** | `init_experiment`, `create_rubric`, `run_experiment`, `score_experiment` |
+| **Resources** | `experiment://list`, `experiment://lineage`, `rubric://list`, `rubric://{name}` |
+| **Prompts** | `experiment_planning`, `rubric_construction`, `experiment_review` |
+
+### Configuration
+
+```json
+{
+  "mcpServers": {
+    "hunch-kit": {
+      "command": "python",
+      "args": ["-m", "hunch_kit_mcp"],
+      "env": {
+        "HUNCH_KIT_WORKSPACE": "/path/to/your/campaign"
+      }
+    }
+  }
+}
+```
+
+---
 
 ## Architecture
 
@@ -29,187 +200,25 @@ hunch_kit fills that gap.
 ├─────────────────────────────────────────────────────────┤
 │  Evaluation                                             │
 │  ┌──────────────────────┐ ┌───────────────────────────┐ │
-│  │ Web UI (FastAPI)     │ │ LLM Judge (hooks)         │ │
-│  │ Side-by-side scoring │ │ Pluggable, optional       │ │
+│  │ Web UI (FastAPI)     │ │ LLM Judge (optional)      │ │
+│  │ Side-by-side scoring │ │ Pluggable, bring your key │ │
 │  └──────────────────────┘ └───────────────────────────┘ │
 └─────────────────────────────────────────────────────────┘
 ```
 
-Three interfaces, one core:
-- **CLI** — scaffold, execute, and evaluate experiments from the terminal
-- **Web UI** — side-by-side comparison with rubric-based human scoring
-- **MCP Server** — AI-assisted experiment planning, rubric construction, and result review via any MCP-compatible client
+---
 
-## Quick Start
+## Design Decisions
 
-### Installation
+1. **No external evaluation dependency** — the evaluation UI and runner are built natively in Python. No Node.js, no Promptfoo, no managed service.
+2. **Provider-agnostic** — hunch_kit doesn't assume LLMs. Any input→output workflow can be a provider.
+3. **Human scoring is first-class** — automated scoring is optional. The web UI is a core feature, not an afterthought.
+4. **Local-first** — everything runs on your machine. No cloud, no accounts, no telemetry.
+5. **Manifest-driven** — `experiment.yaml` is the single source of truth for each experiment.
+6. **Campaign-scoped** — rubrics, experiments, and providers live under one root. Multiple studies never collide.
 
-```bash
-pip install -e .
-```
-
-For MCP server support:
-```bash
-pip install -e ".[mcp]"
-```
-
-### Create an Experiment
-
-```bash
-hunch init
-```
-
-You will be prompted for:
-- **Experiment ID** — a unique slug (e.g. `ex_001_baseline`)
-- **Hypothesis** — what you expect the change to achieve
-- **Variable** — the single variable being tested
-- **Value** — what the variable was changed to
-- **Baseline** — which previous experiment this descends from
-
-### Run an Experiment
-
-```bash
-hunch run ex_001_baseline
-```
-
-The runner loads the manifest, resolves the provider, executes, and writes results back to the manifest.
-
-### Evaluate
-
-```bash
-hunch eval
-```
-
-Opens a local web UI at `http://localhost:8888` with:
-- Side-by-side comparison of baseline and current outputs
-- Scoring form generated from rubric dimensions
-- Scores saved directly to the experiment manifest
-
-### View Experiments
-
-```bash
-hunch list
-hunch lineage
-```
-
-## Core Concepts
-
-### Experiments start with hunches
-
-Every experiment declares a hypothesis, a single variable being changed, and the baseline it descends from. The manifest schema enforces this discipline.
-
-### Pluggable providers
-
-A provider is anything that takes an input and produces an output. Providers implement a simple interface: `run(input, config) → result`. A text generator, a slide deck builder, a style evaluator — any input→output workflow can be a provider.
-
-### Human-in-the-loop evaluation
-
-A lightweight local web UI presents experiment outputs side-by-side for human scoring. Evaluators score against rubric dimensions with configurable scales and calibration anchors. Scores are written back to the experiment manifest.
-
-### Experiment lineage
-
-Every experiment declares its parent. Over time this builds a genealogy — a traceable path from initial hunch to validated output. The lineage prevents the ambiguity that plagues ad-hoc iteration.
-
-### Optional LLM-as-judge
-
-For text-evaluable criteria, an LLM can score outputs against rubric assertions. This runs alongside (not instead of) human evaluation. The judge interface is pluggable — bring your own API key and model.
-
-## MCP Server
-
-The MCP server exposes hunch_kit to AI assistants via three capability types:
-
-**Tools** — operations with real side effects:
-- `init_experiment` — scaffold experiments from structured inputs
-- `create_rubric` — construct rubrics from validated dimension data
-- `run_experiment` — execute through a provider
-- `score_experiment` — record evaluation scores
-
-**Resources** — read-only experiment data:
-- `experiment://list` — all experiments with summaries
-- `experiment://lineage` — full genealogy tree
-- `rubric://list` — available rubrics
-- `rubric://{name}` — specific rubric definition
-
-**Prompts** — guided workflows:
-- `experiment_planning` — hypothesis formulation and variable isolation
-- `rubric_construction` — dimension definition for a domain
-- `experiment_review` — structured result review and next-step planning
-
-### MCP Configuration
-
-```json
-{
-  "mcpServers": {
-    "hunch-kit": {
-      "command": "python",
-      "args": ["-m", "hunch_kit_mcp"],
-      "env": {
-        "HUNCH_KIT_WORKSPACE": "/path/to/your/project"
-      }
-    }
-  }
-}
-```
-
-## Project Structure
-
-```
-hunch_kit/
-├── hunch_kit/                  # Core Python package
-│   ├── cli.py                  # Click-based CLI
-│   ├── manifest.py             # Experiment manifest schema + I/O
-│   ├── rubric.py               # Evaluation rubric schema + I/O
-│   ├── runner.py               # Experiment execution orchestrator
-│   ├── providers/
-│   │   ├── base.py             # Abstract provider interface
-│   │   └── echo.py             # Reference provider for testing
-│   └── evaluation/
-│       ├── human.py            # FastAPI web UI for scoring
-│       └── llm_judge.py        # LLM judge interface (hooks)
-├── hunch_kit_mcp/              # MCP server
-│   ├── server.py               # Server setup
-│   ├── tools.py                # Tools (create, run, score)
-│   ├── resources.py            # Resources (experiment data)
-│   └── prompts.py              # Prompts (guided workflows)
-├── rubrics/                    # Evaluation rubric definitions
-├── experiments/                # Experiment runs
-├── tests/                      # Test suite
-└── pyproject.toml
-```
-
-## Writing a Custom Provider
-
-```python
-from hunch_kit.providers.base import BaseProvider, ProviderResult
-
-class MyProvider(BaseProvider):
-    name = "my_backend"
-
-    def run(self, input_text, config=None):
-        # Your generation logic here
-        output = do_something(input_text, config)
-        return ProviderResult(
-            output=output,
-            status="success",
-            metadata={"model": "v2"},
-        )
-```
-
-Register with the runner:
-
-```python
-from hunch_kit.runner import register_provider
-register_provider(MyProvider)
-```
-
-## Key Design Decisions
-
-1. **No external evaluation tool dependency** — the evaluation UI and experiment runner are built natively in Python.
-2. **Provider-agnostic** — hunch_kit does not assume the backend is an LLM API. It works for any input→output workflow.
-3. **Human scoring is first-class** — automated scoring is optional. The web UI for side-by-side evaluation is a core feature, not an afterthought.
-4. **Local-first** — everything runs on the user's machine. No cloud dependencies, no accounts, no data leaves the system.
-5. **Manifest-driven** — the `experiment.yaml` manifest is the single source of truth for each experiment.
+---
 
 ## Licence
 
-MIT
+MIT — [earlyprototype](https://github.com/earlyprototype)

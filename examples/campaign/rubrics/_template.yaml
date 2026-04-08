@@ -1,0 +1,17 @@
+# Rubric template — copy to rubrics/<name>.yaml and customise.
+#
+# Each dimension: name, description, scale_min, scale_max, evaluator, anchors
+
+name: ""
+description: ""
+
+dimensions:
+  - name: quality
+    description: "Overall quality of the output"
+    scale_min: 1
+    scale_max: 10
+    evaluator: human
+    anchors:
+      1: "Unusable"
+      5: "Acceptable"
+      10: "Exceptional"

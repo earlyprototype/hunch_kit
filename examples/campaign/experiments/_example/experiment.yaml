@@ -1,0 +1,10 @@
+id: _example
+date: '2026-04-10'
+schema_version: '1'
+hypothesis: Reference experiment demonstrating manifest + input layout
+variable_changed: n_a
+variable_value: n_a
+provider: echo
+input_path: input.txt
+rubric: example_minimal
+status: pending

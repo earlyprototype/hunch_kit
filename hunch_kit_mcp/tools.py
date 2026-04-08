@@ -7,25 +7,14 @@ elicitation; the tool's role is construction, validation, and persistence.
 
 from __future__ import annotations
 
-import json
-import os
-import sys
-from pathlib import Path
+import logging
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from ._config import _experiments_dir, _rubrics_dir
 
-def _workspace() -> Path:
-    return Path(os.getenv("HUNCH_KIT_WORKSPACE", os.getcwd()))
-
-
-def _experiments_dir() -> Path:
-    return _workspace() / "experiments"
-
-
-def _rubrics_dir() -> Path:
-    return _workspace() / "rubrics"
+logger = logging.getLogger(__name__)
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -57,7 +46,6 @@ def register_tools(mcp: FastMCP) -> None:
         Returns:
             Confirmation message with the created file paths.
         """
-        sys.path.insert(0, str(_workspace()))
         from hunch_kit.manifest import Manifest
 
         exp_dir = _experiments_dir() / id
@@ -91,8 +79,11 @@ def register_tools(mcp: FastMCP) -> None:
                     if id not in parent.children:
                         parent.children.append(id)
                         parent.save(parent_dir)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Could not update parent lineage for %s: %s",
+                        baseline, exc,
+                    )
 
         return (
             f"Experiment created: {id}\n"
@@ -122,7 +113,6 @@ def register_tools(mcp: FastMCP) -> None:
         Returns:
             Confirmation with the rubric file path.
         """
-        sys.path.insert(0, str(_workspace()))
         from hunch_kit.rubric import Rubric, Dimension
 
         dims = []
@@ -159,7 +149,6 @@ def register_tools(mcp: FastMCP) -> None:
         Returns:
             Execution result summary.
         """
-        sys.path.insert(0, str(_workspace()))
         from hunch_kit.runner import run_experiment as _run
 
         exp_dir = _experiments_dir() / experiment_id
@@ -194,7 +183,6 @@ def register_tools(mcp: FastMCP) -> None:
         Returns:
             Confirmation of saved scores.
         """
-        sys.path.insert(0, str(_workspace()))
         from hunch_kit.manifest import Manifest
 
         exp_dir = _experiments_dir() / experiment_id
@@ -236,7 +224,6 @@ def register_tools(mcp: FastMCP) -> None:
         Returns:
             Confirmation message.
         """
-        sys.path.insert(0, str(_workspace()))
         from hunch_kit.manifest import Manifest
 
         exp_dir = _experiments_dir() / experiment_id

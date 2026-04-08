@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Evaluate: {{ experiment_id }}</h1>
+
+<div class="meta-bar">
+  <span><strong>Hypothesis:</strong> {{ manifest.hypothesis }}</span>
+  <span><strong>Variable:</strong> {{ manifest.variable_changed }} = {{ manifest.variable_value }}</span>
+  <span><strong>Status:</strong> {{ manifest.status }}</span>
+</div>
+
+<div class="comparison">
+  {# ── Baseline panel ── #}
+  <div class="panel">
+    <h2>Baseline{% if manifest.baseline %} — {{ manifest.baseline }}{% else %} — (none){% endif %}</h2>
+    {% if baseline_meta %}
+    <div class="meta-small">{{ baseline_meta }}</div>
+    {% endif %}
+    <div class="output-box">
+      {% if baseline_output %}
+        <pre>{{ baseline_output }}</pre>
+      {% else %}
+        <p class="empty">No baseline output available</p>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ── Current panel ── #}
+  <div class="panel">
+    <h2>Current — {{ experiment_id }}</h2>
+    {% if current_meta %}
+    <div class="meta-small">{{ current_meta }}</div>
+    {% endif %}
+    <div class="output-box">
+      {% if current_output %}
+        <pre>{{ current_output }}</pre>
+      {% else %}
+        <p class="empty">No output yet — run the experiment first</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{# ── Scoring section ── #}
+<div class="scoring-section">
+  <h2>Scoring</h2>
+  <form id="scoring-form" data-experiment-id="{{ experiment_id }}">
+
+    {# Rubric dimensions #}
+    {% if dimensions %}
+      {% for dim in dimensions %}
+      <div class="form-row">
+        <label for="score_{{ dim.name }}">{{ dim.name }}</label>
+        <div class="dim-desc">{{ dim.description }}</div>
+        {% if dim.anchors %}
+        <div class="anchors">
+          {% for k, v in dim.anchors | dictsort %}
+            <strong>{{ k }}</strong>: {{ v }}{% if not loop.last %} · {% endif %}
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% set current_val = manifest.human_scores.get(dim.name, dim.scale_min) %}
+        <input type="range" id="score_{{ dim.name }}" name="{{ dim.name }}"
+               min="{{ dim.scale_min }}" max="{{ dim.scale_max }}"
+               value="{{ current_val }}"
+               oninput="document.getElementById('val_{{ dim.name }}').textContent=this.value">
+        <span id="val_{{ dim.name }}" class="range-val">{{ current_val }}</span>
+      </div>
+      {% endfor %}
+    {% elif not extra_scores %}
+      <p class="empty">No rubric assigned — scores can still be recorded as free-form fields below.</p>
+    {% endif %}
+
+    {# Scores not covered by the rubric #}
+    {% for key, val in extra_scores.items() %}
+    <div class="form-row">
+      <label for="score_{{ key }}">{{ key }}</label>
+      <input type="number" id="score_{{ key }}" name="{{ key }}" value="{{ val }}" step="0.1">
+    </div>
+    {% endfor %}
+
+    {# Preference + notes #}
+    <div class="form-row">
+      <label for="overall_preference">Overall preference vs baseline</label>
+      <select id="overall_preference" name="overall_preference">
+        <option value="">— select —</option>
+        <option value="better"{% if manifest.overall_preference == 'better' %} selected{% endif %}>Better</option>
+        <option value="equivalent"{% if manifest.overall_preference == 'equivalent' %} selected{% endif %}>Equivalent</option>
+        <option value="worse"{% if manifest.overall_preference == 'worse' %} selected{% endif %}>Worse</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label for="notes">Notes</label>
+      <textarea id="notes" name="notes" rows="3">{{ manifest.notes }}</textarea>
+    </div>
+    <button type="submit">Save scores</button>
+    <span id="save-status"></span>
+  </form>
+</div>
+{% endblock %}

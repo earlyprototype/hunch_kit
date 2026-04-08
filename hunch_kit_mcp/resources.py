@@ -7,23 +7,10 @@ definitions without side effects.
 from __future__ import annotations
 
 import json
-import os
-import sys
-from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-
-def _workspace() -> Path:
-    return Path(os.getenv("HUNCH_KIT_WORKSPACE", os.getcwd()))
-
-
-def _experiments_dir() -> Path:
-    return _workspace() / "experiments"
-
-
-def _rubrics_dir() -> Path:
-    return _workspace() / "rubrics"
+from ._config import _experiments_dir, _rubrics_dir
 
 
 def register_resources(mcp: FastMCP) -> None:
@@ -36,7 +23,6 @@ def register_resources(mcp: FastMCP) -> None:
         Returns a JSON array of experiment summaries including
         ID, status, baseline, hypothesis, and scoring state.
         """
-        sys.path.insert(0, str(_workspace()))
         from hunch_kit.manifest import load_all_manifests
 
         manifests = load_all_manifests(_experiments_dir())
@@ -61,7 +47,6 @@ def register_resources(mcp: FastMCP) -> None:
         Returns a JSON object mapping each experiment ID to its
         list of child experiment IDs.
         """
-        sys.path.insert(0, str(_workspace()))
         from hunch_kit.manifest import load_all_manifests, build_lineage
 
         manifests = load_all_manifests(_experiments_dir())
@@ -74,7 +59,6 @@ def register_resources(mcp: FastMCP) -> None:
 
         Returns the complete experiment.yaml content as JSON.
         """
-        sys.path.insert(0, str(_workspace()))
         from hunch_kit.manifest import Manifest
 
         exp_dir = _experiments_dir() / experiment_id
@@ -91,7 +75,6 @@ def register_resources(mcp: FastMCP) -> None:
         Returns a JSON array of rubric summaries including
         name, description, and dimension count.
         """
-        sys.path.insert(0, str(_workspace()))
         from hunch_kit.rubric import find_rubrics, Rubric
 
         rubric_dir = _rubrics_dir()
@@ -120,7 +103,6 @@ def register_resources(mcp: FastMCP) -> None:
         Returns the complete rubric YAML content as JSON,
         including all dimensions, scales, and anchors.
         """
-        sys.path.insert(0, str(_workspace()))
         from hunch_kit.rubric import load_rubric_by_name
 
         rubric = load_rubric_by_name(_rubrics_dir(), name)

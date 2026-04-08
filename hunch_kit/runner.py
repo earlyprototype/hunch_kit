@@ -6,12 +6,17 @@ and writes results back to the manifest.
 
 from __future__ import annotations
 
-import asyncio
+import importlib.util
+import inspect
+import logging
 import time
 from pathlib import Path
 from typing import Any
 
-from .manifest import Manifest, MANIFEST_FILENAME
+logger = logging.getLogger(__name__)
+
+from .manifest import Manifest
+from .project import ProjectConfig, infer_campaign_root_from_experiment_dir, providers_dir
 from .providers.base import BaseProvider, ProviderResult
 
 
@@ -31,15 +36,58 @@ def _ensure_builtins_registered() -> None:
         register_provider(EchoProvider)
 
 
-def resolve_provider(name: str) -> BaseProvider:
-    """Look up a provider by name and return an instance."""
+def discover_local_provider_classes(
+    campaign_root: Path | None,
+) -> dict[str, type[BaseProvider]]:
+    """Load ``BaseProvider`` subclasses from the campaign ``providers`` folder."""
+    out: dict[str, type[BaseProvider]] = {}
+    if campaign_root is None:
+        return out
+    campaign_root = Path(campaign_root)
+    config = ProjectConfig.load(campaign_root)
+    pdir = providers_dir(campaign_root, config)
+    if not pdir.is_dir():
+        return out
+
+    for py in sorted(pdir.glob("*.py")):
+        if py.name.startswith("_") or py.name == "__init__.py":
+            continue
+        mod_name = f"hunch_kit_campaign_provider_{py.stem}"
+        spec = importlib.util.spec_from_file_location(mod_name, py)
+        if spec is None or spec.loader is None:
+            continue
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        except Exception:
+            logger.warning("Failed to load provider module %s", py, exc_info=True)
+            continue
+        for _, obj in inspect.getmembers(mod, inspect.isclass):
+            if obj is BaseProvider or not issubclass(obj, BaseProvider):
+                continue
+            pname = getattr(obj, "name", None)
+            if pname:
+                out[pname] = obj
+    return out
+
+
+def resolve_provider(
+    name: str,
+    *,
+    campaign_root: Path | None = None,
+) -> BaseProvider:
+    """Look up a provider by name; local campaign providers override built-ins."""
     _ensure_builtins_registered()
-    cls = PROVIDER_REGISTRY.get(name)
+    local = discover_local_provider_classes(campaign_root)
+    cls = local.get(name) or PROVIDER_REGISTRY.get(name)
     if cls is None:
-        available = ", ".join(sorted(PROVIDER_REGISTRY)) or "(none)"
-        raise ValueError(
-            f"Unknown provider {name!r}. Available: {available}"
-        )
+        available = sorted({*local.keys(), *PROVIDER_REGISTRY.keys()})
+        listed = ", ".join(available) if available else "(none)"
+        raise ValueError(f"Unknown provider {name!r}. Available: {listed}")
+    if name in local:
+        logger.debug("Resolved local provider %r from campaign", name)
+    else:
+        logger.debug("Resolved built-in provider %r", name)
     return cls()
 
 
@@ -61,6 +109,7 @@ def run_experiment(
     """
     experiment_dir = Path(experiment_dir)
     manifest = Manifest.load(experiment_dir)
+    logger.info("Running experiment %r", manifest.id)
 
     provider_name = provider_override or manifest.provider
     if not provider_name:
@@ -69,18 +118,22 @@ def run_experiment(
             f"no override was given."
         )
 
-    provider = resolve_provider(provider_name)
-
-    input_text = _read_input(experiment_dir, manifest)
+    campaign_root = infer_campaign_root_from_experiment_dir(experiment_dir)
+    provider = resolve_provider(provider_name, campaign_root=campaign_root)
 
     manifest.status = "running"
     manifest.save(experiment_dir)
 
     start = time.monotonic()
     try:
+        input_text = _read_input(experiment_dir, manifest)
         result = provider.run(input_text, manifest.provider_config or None)
     except Exception as exc:
         elapsed = time.monotonic() - start
+        logger.error(
+            "Experiment %r failed after %.1fs: %s",
+            manifest.id, elapsed, exc,
+        )
         result = ProviderResult(
             output="",
             status="failed",
@@ -90,6 +143,11 @@ def run_experiment(
 
     _apply_result(manifest, result, experiment_dir)
     manifest.save(experiment_dir)
+    logger.info(
+        "Experiment %r finished: status=%s duration=%.1fs",
+        manifest.id, result.status,
+        result.duration_seconds or 0,
+    )
     return result
 
 
@@ -109,7 +167,9 @@ async def run_experiment_async(
             f"no override was given."
         )
 
-    provider = resolve_provider(provider_name)
+    campaign_root = infer_campaign_root_from_experiment_dir(experiment_dir)
+    provider = resolve_provider(provider_name, campaign_root=campaign_root)
+
     input_text = _read_input(experiment_dir, manifest)
 
     manifest.status = "running"

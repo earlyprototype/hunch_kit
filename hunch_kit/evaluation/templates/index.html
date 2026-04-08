@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>hunch_kit — Experiments</h1>
+<table>
+  <thead>
+    <tr>
+      <th>ID</th><th>Status</th><th>Baseline</th>
+      <th>Preference</th><th>Scored</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for m in manifests %}
+    <tr>
+      <td><a href="/eval/{{ m.id }}">{{ m.id }}</a></td>
+      <td class="{{ status_classes.get(m.status, '') }}">{{ m.status }}</td>
+      <td>{{ m.baseline or "—" }}</td>
+      <td>{{ m.overall_preference or "—" }}</td>
+      <td>{{ "Yes" if m.human_scores else "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

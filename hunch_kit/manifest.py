@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from datetime import date
+import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA_VERSION = "1"
@@ -94,6 +97,7 @@ class Manifest:
             ),
             encoding="utf-8",
         )
+        logger.debug("Saved manifest %r to %s", self.id, path)
         return path
 
     # -- Deserialisation ------------------------------------------------------
@@ -105,7 +109,9 @@ class Manifest:
         if path.is_dir():
             path = path / MANIFEST_FILENAME
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return cls._from_dict(data)
+        manifest = cls._from_dict(data)
+        logger.debug("Loaded manifest %r from %s", manifest.id, path)
+        return manifest
 
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> Manifest:
