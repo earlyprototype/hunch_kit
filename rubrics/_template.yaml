@@ -1,0 +1,36 @@
+# hunch_kit Rubric Template
+#
+# Copy this file to rubrics/<your_rubric>.yaml and customise
+# the dimensions for your domain.
+#
+# Each dimension defines:
+#   name         -- short identifier (used as the score key)
+#   description  -- what this dimension measures
+#   scale_min    -- minimum score value (default: 1)
+#   scale_max    -- maximum score value (default: 10)
+#   evaluator    -- who scores this: "human", "llm", or "both"
+#   anchors      -- optional score-to-description mapping for calibration
+
+name: ""
+description: ""
+
+dimensions:
+  - name: quality
+    description: "Overall quality of the output"
+    scale_min: 1
+    scale_max: 10
+    evaluator: human
+    anchors:
+      1: "Unusable — fundamental failures"
+      5: "Acceptable — meets basic requirements with notable gaps"
+      10: "Exceptional — exceeds expectations across all criteria"
+
+  - name: accuracy
+    description: "Faithfulness to source material and factual correctness"
+    scale_min: 1
+    scale_max: 10
+    evaluator: both
+    anchors:
+      1: "Significant factual errors or fabricated content"
+      5: "Mostly accurate with minor omissions"
+      10: "Fully accurate, comprehensive, and well-sourced"
