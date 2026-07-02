@@ -79,4 +79,4 @@ A landscape assessment (see `_prompt_experiments/TOOLING_LANDSCAPE_REPORT.md`) f
 
 ## Target
 
-GitHub portfolio piece at github.com/earlyprototype/hunch_kit
+A reusable, local-first experimentation and evaluation framework for the author's own AI experiments, at github.com/earlyprototype/hunch_kit
