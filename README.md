@@ -18,7 +18,7 @@ One hunch. One variable. One comparison. Repeat until you actually know what wor
   <img src="assets/hunch_kit.gif" alt="Two slide designs shown side by side in the hunch_kit evaluation UI — a plain draft versus a polished redesign — scored by hand with a quality slider and a preference." width="100%">
 </p>
 
-<p align="center"><em>Change one variable, see both outputs side by side, and score by hand. Here: a draft slide vs a redesign, judged in the eval UI.</em></p>
+<p align="center"><em>Change one variable, see both outputs side by side, and score by hand. Here: two AI-generated album-cover concepts, judged in the eval UI.</em></p>
 
 ```bash
 # Scaffold a campaign
