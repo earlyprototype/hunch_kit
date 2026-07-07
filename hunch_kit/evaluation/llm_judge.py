@@ -1,8 +1,8 @@
 """LLM-as-judge interface — hook point for automated scoring.
 
 This module defines the abstract interface for LLM-based evaluation.
-No concrete implementation is provided; custom judges can be built
-by subclassing ``LLMJudge`` and registering with the runner.
+No concrete implementation is provided; custom judges are built by
+subclassing ``LLMJudge`` and invoking them directly from your own code.
 
 The interface is intentionally minimal: given an output and a rubric
 dimension, produce a score with reasoning.
@@ -35,7 +35,8 @@ class LLMJudge(abc.ABC):
     To implement a judge:
     1. Subclass ``LLMJudge``
     2. Implement ``score()`` to call your preferred LLM API
-    3. Register the judge with the runner via ``runner.register_judge()``
+    3. Instantiate it and call ``score()`` for each rubric dimension,
+       writing results into the manifest's ``automated_scores``
 
     Example::
 
@@ -51,6 +52,11 @@ class LLMJudge(abc.ABC):
                     reasoning="The output demonstrates...",
                     model="gemini-2.5-flash",
                 )
+
+        judge = GeminiJudge()
+        result = judge.score(output_text, dimension)
+        manifest.automated_scores[result.dimension] = result.score
+        manifest.save(experiment_dir)
     """
 
     name: str = "base"
