@@ -65,17 +65,9 @@ Every experiment declares its parent. Over time this builds a genealogy — a tr
 
 _promptForge remains as a working task-specific tool for NotebookLM slide experiments. hunch_kit is the generalised framework. A NotebookLM provider for hunch_kit can be written to replicate _promptForge's functionality within the new architecture.
 
-## Reference Implementation
-
-See `_tools/_promptForge/` for the task-specific predecessor:
-- `manifests/_template.yaml` — experiment manifest schema (carries over directly)
-- `providers/notebooklm.py` — example of a custom provider wrapping an async API
-- `rubrics/slide_quality.yaml` — example of domain-specific evaluation criteria
-- `scripts/init_experiment.py` — experiment scaffolding pattern
-
 ## Market Context
 
-A landscape assessment (see `_prompt_experiments/TOOLING_LANDSCAPE_REPORT.md`) found that existing tools (Promptfoo, Langfuse, Agenta, MLflow) are architecturally oriented toward programmatic LLM API interaction. None provide a lightweight, provider-agnostic framework with native human-in-the-loop evaluation for creative workflows. hunch_kit fills this gap.
+A landscape assessment found that existing tools (Promptfoo, Langfuse, Agenta, MLflow) are architecturally oriented toward programmatic LLM API interaction. None provide a lightweight, provider-agnostic framework with native human-in-the-loop evaluation for creative workflows. hunch_kit fills this gap.
 
 ## Target
 
