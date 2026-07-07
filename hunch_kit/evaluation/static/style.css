@@ -249,3 +249,5 @@ button[type="submit"]:hover { background: var(--accent-hover); }
 .error-page a:hover {
   text-decoration: underline;
 }
+
+.output-image { max-width: 100%; height: auto; display: block; border-radius: 6px; }

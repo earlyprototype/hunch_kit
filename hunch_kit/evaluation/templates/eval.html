@@ -17,7 +17,9 @@
     <div class="meta-small">{{ baseline_meta }}</div>
     {% endif %}
     <div class="output-box">
-      {% if baseline_output %}
+      {% if baseline_output.startswith('data:image') %}
+        <img class="output-image" src="{{ baseline_output }}" alt="Baseline output">
+      {% elif baseline_output %}
         <pre>{{ baseline_output }}</pre>
       {% else %}
         <p class="empty">No baseline output available</p>
@@ -32,7 +34,9 @@
     <div class="meta-small">{{ current_meta }}</div>
     {% endif %}
     <div class="output-box">
-      {% if current_output %}
+      {% if current_output.startswith('data:image') %}
+        <img class="output-image" src="{{ current_output }}" alt="Current output">
+      {% elif current_output %}
         <pre>{{ current_output }}</pre>
       {% else %}
         <p class="empty">No output yet — run the experiment first</p>

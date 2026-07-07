@@ -165,14 +165,22 @@ def _read_output(exp_dir: Path, manifest: Manifest) -> str:
     if not manifest.output_path:
         return ""
     output_path = exp_dir / manifest.output_path
-    if output_path.exists() and output_path.suffix in (".txt", ".md", ".yaml", ".yml", ".json"):
+    if not output_path.exists():
+        return ""
+    suffix = output_path.suffix.lower()
+    if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"):
+        import base64
+        import mimetypes
+
+        mime = mimetypes.guess_type(str(output_path))[0] or "image/png"
+        encoded = base64.b64encode(output_path.read_bytes()).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+    if suffix in (".txt", ".md", ".yaml", ".yml", ".json"):
         try:
             return output_path.read_text(encoding="utf-8")[:50_000]
         except Exception:
             return f"[Could not read: {output_path.name}]"
-    elif output_path.exists():
-        return f"[Binary file: {output_path.name} — open externally]"
-    return ""
+    return f"[Binary file: {output_path.name} — open externally]"
 
 
 def _format_meta(manifest: Manifest) -> str:
