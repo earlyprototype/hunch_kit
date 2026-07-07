@@ -170,13 +170,12 @@ async def run_experiment_async(
     campaign_root = infer_campaign_root_from_experiment_dir(experiment_dir)
     provider = resolve_provider(provider_name, campaign_root=campaign_root)
 
-    input_text = _read_input(experiment_dir, manifest)
-
     manifest.status = "running"
     manifest.save(experiment_dir)
 
     start = time.monotonic()
     try:
+        input_text = _read_input(experiment_dir, manifest)
         result = await provider.async_run(input_text, manifest.provider_config or None)
     except Exception as exc:
         elapsed = time.monotonic() - start

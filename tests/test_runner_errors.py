@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -10,7 +11,7 @@ import pytest
 
 from hunch_kit.manifest import Manifest
 from hunch_kit.providers.base import BaseProvider, ProviderResult
-from hunch_kit.runner import run_experiment
+from hunch_kit.runner import run_experiment, run_experiment_async
 
 
 class CrashingProvider(BaseProvider):
@@ -92,6 +93,24 @@ class TestMissingInput:
         assert "nonexistent.txt" in result.error
 
         # Manifest should reflect the failure
+        m = Manifest.load(exp)
+        assert m.status == "failed"
+
+    def test_missing_input_file_fails_gracefully_async(self, tmp_path: Path) -> None:
+        """The async runner should record a missing input as a failure, like the sync one."""
+        exp = tmp_path / "experiments" / "ex_missing_async"
+        m = Manifest(
+            id="ex_missing_async", hypothesis="h",
+            variable_changed="v", variable_value="val",
+            provider="echo", input_path="nonexistent.txt",
+        )
+        m.save(exp)
+        (exp / "output").mkdir()
+
+        result = asyncio.run(run_experiment_async(exp))
+        assert result.status == "failed"
+        assert "nonexistent.txt" in result.error
+
         m = Manifest.load(exp)
         assert m.status == "failed"
 
