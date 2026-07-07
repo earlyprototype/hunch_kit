@@ -8,7 +8,7 @@ One hunch. One variable. One comparison. Repeat until you actually know what wor
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/licence-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-61%20passed-brightgreen.svg)]()
+[![Tests](https://github.com/earlyprototype/hunch_kit/actions/workflows/tests.yml/badge.svg)](https://github.com/earlyprototype/hunch_kit/actions/workflows/tests.yml)
 
 ---
 
