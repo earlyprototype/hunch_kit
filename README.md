@@ -218,7 +218,7 @@ hunch_kit ships an MCP server for AI-assisted experiment management. Three capab
 
 1. **No external evaluation dependency** — the evaluation UI and runner are built natively in Python. No Node.js, no Promptfoo, no managed service.
 2. **Provider-agnostic** — hunch_kit doesn't assume LLMs. Any input→output workflow can be a provider.
-3. **Human scoring is first-class** — automated scoring is optional. The web UI is a core feature, not an afterthought.
+3. **Human scoring orientated** — automated scoring is available but optional. A web UI delivers outputs for comparative scoring.
 4. **Local-first** — everything runs on your machine. No cloud, no accounts, no telemetry.
 5. **Manifest-driven** — `experiment.yaml` is the single source of truth for each experiment.
 6. **Campaign-scoped** — rubrics, experiments, and providers live under one root. Multiple studies never collide.
