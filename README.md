@@ -15,7 +15,7 @@ One hunch. One variable. One comparison. Repeat until you actually know what wor
 ## 30-Second Demo
 
 <p align="center">
-  <img src="assets/hunch_kit.gif" alt="Two slide designs shown side by side in the hunch_kit evaluation UI — a plain draft versus a polished redesign — scored by hand with a quality slider and a preference." width="100%">
+  <img src="assets/hunch_kit.gif" alt="The hunch_kit evaluation UI with a fixed baseline image on the left. On the right, two AI-generated candidate covers appear one after another and are each scored by hand with a quality slider — a neon car scores 6/10, a synthwave sun scores 9/10 and is marked Better." width="100%">
 </p>
 
 <p align="center"><em>Change one variable, see both outputs side by side, and score by hand. Here: two AI-generated album-cover concepts, judged in the eval UI.</em></p>
