@@ -16,12 +16,6 @@
     {% if baseline_meta %}
     <div class="meta-small">{{ baseline_meta }}</div>
     {% endif %}
-    {% if baseline_input %}
-    <div class="prompt-box">
-      <span class="prompt-label">Prompt</span>
-      <p class="prompt-text">{{ baseline_input }}</p>
-    </div>
-    {% endif %}
     <div class="output-box">
       {% if baseline_output.startswith('data:image') %}
         <img class="output-image" src="{{ baseline_output }}" alt="Baseline output">
@@ -39,12 +33,6 @@
     {% if current_meta %}
     <div class="meta-small">{{ current_meta }}</div>
     {% endif %}
-    {% if current_input %}
-    <div class="prompt-box">
-      <span class="prompt-label">Prompt</span>
-      <p class="prompt-text">{{ current_input }}</p>
-    </div>
-    {% endif %}
     <div class="output-box">
       {% if current_output.startswith('data:image') %}
         <img class="output-image" src="{{ current_output }}" alt="Current output">
@@ -58,7 +46,8 @@
 </div>
 
 {# ── Scoring section ── #}
-<div class="scoring-section">
+<div class="scoring-section{% if current_input %} has-prompt{% endif %}">
+  <div class="scoring-main">
   <h2>Scoring</h2>
   <form id="scoring-form" data-experiment-id="{{ experiment_id }}">
 
@@ -112,5 +101,15 @@
     <button type="submit">Save scores</button>
     <span id="save-status"></span>
   </form>
+  </div>
+
+  {% if current_input %}
+  <aside class="scoring-prompt">
+    <h2>Prompt — {{ experiment_id }}</h2>
+    <div class="prompt-box">
+      <p class="prompt-text">{{ current_input }}</p>
+    </div>
+  </aside>
+  {% endif %}
 </div>
 {% endblock %}

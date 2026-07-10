@@ -178,6 +178,33 @@ td a:hover { text-decoration: underline; }
   padding: 1.5rem;
   margin-bottom: 2rem;
 }
+.scoring-section.has-prompt {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+@media (max-width: 768px) {
+  .scoring-section.has-prompt { grid-template-columns: 1fr; }
+}
+
+.scoring-prompt {
+  border-left: 1px solid var(--border);
+  padding-left: 1.5rem;
+}
+.scoring-prompt h2 { margin-bottom: 0.75rem; }
+.scoring-prompt .prompt-box {
+  max-height: 480px;
+  overflow-y: auto;
+  margin-bottom: 0;
+}
+.scoring-prompt .prompt-text {
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 .form-row {
   margin-bottom: 1.25rem;
