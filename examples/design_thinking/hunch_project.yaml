@@ -1,0 +1,4 @@
+name: design_thinking
+description: A real incremental lineage — fuji-styled NotebookLM infographics of design thinking, scored by hand
+default_provider: notebooklm
+default_rubric: design_infographic

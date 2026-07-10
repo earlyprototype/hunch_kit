@@ -1,0 +1,17 @@
+id: dt_v1
+date: '2026-07-10'
+schema_version: '1'
+hypothesis: "Baseline — a fuji TechNeonArt infographic of design thinking"
+variable_changed: detail
+variable_value: standard
+provider: notebooklm
+input_path: input.txt
+output_path: output/result.png
+status: success
+rubric: design_infographic
+children:
+- dt_v2
+human_scores:
+  text_accuracy: 3
+  visual_fidelity: 9
+notes: "Strong fuji aesthetic. But standard detail packs dense small text, and the image renderer garbles many words (e.g. 'cntangled', 'tanglole', 'foilore', 'clides'). Title itself is fine."

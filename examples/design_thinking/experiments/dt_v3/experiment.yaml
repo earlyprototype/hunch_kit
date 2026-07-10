@@ -1,0 +1,17 @@
+id: dt_v3
+date: '2026-07-10'
+schema_version: '1'
+hypothesis: "Constrain headings to plain sans + a spelling rule to fix the title, keeping the concise body"
+variable_changed: heading_typography
+variable_value: "plain bold sans + spell-exactly rule (was serif/sans mix)"
+provider: notebooklm
+input_path: input.txt
+output_path: output/result.png
+status: success
+rubric: design_infographic
+baseline: dt_v2
+human_scores:
+  text_accuracy: 10
+  visual_fidelity: 8
+overall_preference: better
+notes: "All text correct — 'DESIGN THINKING', 'BUILD TO THINK'. Concise body gains kept, fuji aesthetic intact. Cost: headings are plainer sans-serif, not ornate serif (fidelity 9->8). Root cause confirmed: large ornate serif display was the corruption source."

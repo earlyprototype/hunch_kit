@@ -15,7 +15,7 @@ One hunch. One variable. One comparison. Repeat until you actually know what wor
 ## 30-Second Demo
 
 <p align="center">
-  <img src="assets/hunch_kit.gif" alt="The hunch_kit evaluation UI with a fixed baseline image on the left. On the right, two AI-generated candidate covers appear one after another and are each scored by hand with a quality slider — a neon car scores 6/10, a synthwave sun scores 9/10 and is marked Better." width="100%">
+  <img src="assets/hunch_kit.gif" alt="The hunch_kit evaluation UI comparing two versions of a design-thinking infographic generated with the fuji NotebookLM method. The baseline (dt_v2) has a garbled title reading 'BUILLD TO LEARN'; after changing one variable — heading typography to plain sans-serif with a spelling rule — the current version (dt_v3) reads 'DESIGN THINKING' correctly. Scored by hand: text accuracy 10, visual fidelity 8, marked Better." width="100%">
 </p>
 
 <p align="center"><em>Change one variable, see both outputs side by side, and score by hand. Here: two AI-generated album-cover concepts, judged in the eval UI.</em></p>

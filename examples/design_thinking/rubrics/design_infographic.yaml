@@ -1,0 +1,22 @@
+name: design_infographic
+description: Human rubric for fuji-styled design-thinking infographics
+
+dimensions:
+  - name: text_accuracy
+    description: Are all words spelled correctly — no garbled, duplicated, or dropped letters?
+    scale_min: 1
+    scale_max: 10
+    evaluator: human
+    anchors:
+      1: "Many rendering errors"
+      5: "A few visible typos"
+      10: "Every word correct"
+  - name: visual_fidelity
+    description: Does it hold the fuji TechNeonArt aesthetic (beige ground, neon-yellow geometry, cut-out photos, blueprint grid)?
+    scale_min: 1
+    scale_max: 10
+    evaluator: human
+    anchors:
+      1: "Off-style"
+      5: "Recognisable but compromised"
+      10: "Fully on-style"
