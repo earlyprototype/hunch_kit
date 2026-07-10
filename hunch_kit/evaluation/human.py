@@ -94,14 +94,17 @@ def create_app(
         rubric = _load_rubric_for(manifest, app.state.rubrics_dir)
 
         current_output = _read_output(exp_dir, manifest)
+        current_input = _read_input(exp_dir, manifest)
         baseline_output = ""
         baseline_meta = ""
+        baseline_input = ""
         if manifest.baseline:
             baseline_dir = app.state.experiments_dir / manifest.baseline
             if baseline_dir.exists():
                 baseline_manifest = Manifest.load(baseline_dir)
                 baseline_output = _read_output(baseline_dir, baseline_manifest)
                 baseline_meta = _format_meta(baseline_manifest)
+                baseline_input = _read_input(baseline_dir, baseline_manifest)
 
         # Prepare scoring data
         dimensions = rubric.human_dimensions() if rubric else []
@@ -117,8 +120,10 @@ def create_app(
             experiment_id=experiment_id,
             manifest=manifest,
             current_output=current_output,
+            current_input=current_input,
             current_meta=_format_meta(manifest),
             baseline_output=baseline_output,
+            baseline_input=baseline_input,
             baseline_meta=baseline_meta,
             dimensions=dimensions,
             extra_scores=extra_scores,
@@ -159,6 +164,19 @@ def _load_rubric_for(manifest: Manifest, rubrics_dir: Path) -> Rubric | None:
     if not manifest.rubric:
         return None
     return load_rubric_by_name(rubrics_dir, manifest.rubric)
+
+
+def _read_input(exp_dir: Path, manifest: Manifest) -> str:
+    """Read the experiment input (prompt) as text, if one was recorded."""
+    if not manifest.input_path:
+        return ""
+    input_path = exp_dir / manifest.input_path
+    if not input_path.exists():
+        return ""
+    try:
+        return input_path.read_text(encoding="utf-8").strip()[:5_000]
+    except Exception:
+        return ""
 
 
 def _read_output(exp_dir: Path, manifest: Manifest) -> str:

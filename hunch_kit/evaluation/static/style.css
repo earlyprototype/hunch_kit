@@ -144,6 +144,31 @@ td a:hover { text-decoration: underline; }
   font-style: italic;
 }
 
+/* -- Input / prompt panel ------------------------------------------------- */
+
+.prompt-box {
+  background: #f5f7fa;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 0.55rem 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.prompt-label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 0.2rem;
+}
+.prompt-text {
+  font-size: 0.85rem;
+  color: var(--text);
+  line-height: 1.45;
+}
+
 /* -- Scoring form --------------------------------------------------------- */
 
 .scoring-section {
