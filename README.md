@@ -15,7 +15,7 @@ One hunch. One variable. One comparison. Repeat until you actually know what wor
 ## 30-Second Demo
 
 <p align="center">
-  <img src="assets/hunch_kit.gif" alt="The hunch_kit evaluation UI comparing two versions of a design-thinking infographic generated with the fuji NotebookLM method. The baseline (dt_v2) has a garbled title reading 'BUILLD TO LEARN'; after changing one variable — heading typography to plain sans-serif with a spelling rule — the current version (dt_v3) reads 'DESIGN THINKING' correctly. Scored by hand: text accuracy 10, visual fidelity 8, marked Better." width="100%">
+  <img src="assets/hunch_kit.gif" alt="The hunch_kit evaluation UI walking a two-step incremental lineage of design-thinking infographics generated with the fuji NotebookLM method. Iteration 1 changes detail to concise: baseline v1 has garbled body text, current v2 cleans the body but garbles the title to 'BUILLD' — scored 6/9. Iteration 2 changes heading typography to plain sans-serif with a spelling rule: baseline v2 'BUILLD' becomes current v3 'DESIGN THINKING', correct — scored 10/8. Each step records the one changed variable and its hand scores." width="100%">
 </p>
 
 <p align="center"><em>Change one variable, see both outputs side by side, and score by hand. Here: two AI-generated album-cover concepts, judged in the eval UI.</em></p>
