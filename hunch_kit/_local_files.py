@@ -56,7 +56,7 @@ def _local_fd(path: Path, parent_fd: int | None, *, directory: bool) -> Iterator
 
 
 def local_files(
-    root: Path, pattern: str, *, recursive: bool = False, preferred: Path | None = None,
+    root: Path, pattern: str, *, recursive: bool = False, preferred_name: str | None = None,
 ) -> Iterator[tuple[Path, TextIO]]:
     """Yield a path and its verified UTF-8 stream for the current iteration."""
     def walk(directory: Path, parent_fd: int | None) -> Iterator[tuple[Path, TextIO]]:
@@ -65,8 +65,8 @@ def local_files(
                 return
             with os.scandir(directory if os.name == "nt" else dir_fd) as scan:
                 entries = sorted(scan, key=lambda entry: entry.name)
-            if preferred is not None:
-                entries.sort(key=lambda entry: directory / entry.name != preferred)
+            if preferred_name is not None:
+                entries.sort(key=lambda entry: entry.name != preferred_name)
             for entry in entries:
                 path = directory / entry.name
                 if path.match(pattern) and entry.is_file(follow_symlinks=False):

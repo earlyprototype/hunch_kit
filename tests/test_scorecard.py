@@ -153,6 +153,71 @@ def test_opposite_rubric_instructions_prevent_a_delta(tmp_project: Path) -> None
     assert "| `clarity` | 6 | 8 | Incomparable rubrics |" in section(export(tmp_project), "b")
 
 
+def test_ambiguous_declared_name_requires_a_filename_for_comparison(tmp_project: Path) -> None:
+    directory = tmp_project / "rubrics"
+    for stem, maximum, instructions in [("first", 10, "Higher is better"), ("second", 5, "Lower is better")]:
+        path = Rubric("Review", instructions, [Dimension("clarity", scale_max=maximum)]).save(directory)
+        path.rename(directory / f"{stem}.yaml")
+    for experiment, parent, reference, score in [
+        ("baseline", "", "first", 2),
+        ("ambiguous", "baseline", "Review", 4),
+        ("pinned", "baseline", "first.yaml", 4),
+    ]:
+        Manifest(id=experiment, baseline=parent, rubric=reference, human_scores={"clarity": score}).save(
+            tmp_project / "experiments" / experiment
+        )
+
+    report = export(tmp_project)
+    assert "| `clarity` | 2 | 4 | Incomparable rubrics |" in section(report, "ambiguous")
+    assert "| `clarity` | 2 | 4 | +2 |" in section(report, "pinned")
+
+
+def test_declared_name_and_literal_stem_resolve_to_same_rubric(tmp_project: Path) -> None:
+    directory = tmp_project / "rubrics"
+    (directory / "Human Review.yaml").write_text(
+        "name: 'UX: Clarity'\ndimensions:\n- name: clarity\n", encoding="utf-8",
+    )
+    # Both the normalized alias and a declared name compete with the literal stem.
+    (directory / "human_review.yaml").write_text(
+        "name: Other\ndimensions:\n- name: clarity\n  scale_max: 5\n", encoding="utf-8",
+    )
+    (directory / "earlier.yaml").write_text(
+        "name: Human Review\ndimensions:\n- name: clarity\n  scale_max: 3\n", encoding="utf-8",
+    )
+    for experiment, parent, reference, score in [
+        ("baseline", "", "UX: Clarity", 2), ("revision", "baseline", "Human Review", 4),
+    ]:
+        Manifest(id=experiment, baseline=parent, rubric=reference, human_scores={"clarity": score}).save(
+            tmp_project / "experiments" / experiment
+        )
+
+    assert "| `clarity` | 2 | 4 | +2 |" in section(export(tmp_project), "revision")
+
+
+@pytest.mark.parametrize("draft", [
+    "name: Draft\ndimensions:\n", "name: Draft\ndimensions: []\n",
+    "name: Draft\ndimensions: [unfinished", "name: Draft\ndimensions: [clarity]\n",
+])
+def test_unusable_rubric_does_not_hide_scores_or_other_rubrics(tmp_project: Path, draft: str) -> None:
+    directory = tmp_project / "rubrics"
+    (directory / "draft.yaml").write_text(draft, encoding="utf-8")
+    path = Rubric("Review", dimensions=[Dimension("clarity")]).save(directory)
+    path.rename(directory / "published.yaml")
+    for experiment, parent, reference, score in [
+        ("baseline", "", "Review", 2), ("revision", "baseline", "Review", 4),
+        ("unfinished", "baseline", "draft", 3),
+    ]:
+        Manifest(id=experiment, baseline=parent, rubric=reference, human_scores={"clarity": score}).save(
+            tmp_project / "experiments" / experiment
+        )
+
+    report = export(tmp_project)
+    assert "| `clarity` | 2 | 4 | +2 |" in section(report, "revision")
+    unfinished = section(report, "unfinished")
+    assert "Rubric: `draft` (unavailable)" in unfinished
+    assert "| `clarity` | 2 | 3 | Incomparable rubrics |" in unfinished
+
+
 def test_duplicate_dimension_prevents_only_its_own_delta(tmp_project: Path) -> None:
     Rubric(name="Review", dimensions=[
         Dimension("clarity", scale_max=5), Dimension("clarity"), Dimension("tone"),
@@ -196,9 +261,10 @@ def test_scale_bounds_are_numeric_and_finite(tmp_project: Path, low, high, chang
     assert f"| `quality` | 8 | 10 | {change} |" in section(report, "c")
 
 
-def test_blank_score_and_zero(tmp_project: Path) -> None:
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_blank_score_and_zero(tmp_project: Path, blank: str) -> None:
     Rubric(name="Review", dimensions=[Dimension("quality", scale_min=0)]).save(tmp_project / "rubrics")
-    for experiment, parent, score in [("a", "", 3), ("b", "a", ""), ("c", "b", 0), ("d", "a", 0)]:
+    for experiment, parent, score in [("a", "", 3), ("b", "a", blank), ("c", "b", 0), ("d", "a", 0)]:
         Manifest(id=experiment, baseline=parent, rubric="Review", human_scores={"quality": score}).save(
             tmp_project / "experiments" / experiment
         )
@@ -356,6 +422,14 @@ def test_reparse_files_are_excluded_by_open_handle(tmp_project: Path, monkeypatc
     assert "Rubric: `Review` (unavailable)" in section(report, "local")
 
 
+def link_directory(link: Path, target: Path) -> None:
+    if os.name == "nt":
+        from _winapi import CreateJunction
+        CreateJunction(str(target), str(link))
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
 @pytest.mark.parametrize("relative_link", ["experiments", "experiments/group"])
 def test_linked_experiment_directories_are_skipped(tmp_path: Path, relative_link: str) -> None:
     campaign = tmp_path / "campaign"
@@ -363,10 +437,18 @@ def test_linked_experiment_directories_are_skipped(tmp_path: Path, relative_link
     link.parent.mkdir(parents=True)
     outside = tmp_path / "other" / "experiments"
     Manifest(id="outside").save(outside / "sample")
-    if os.name == "nt":
-        from _winapi import CreateJunction
-        CreateJunction(str(outside), str(link))
-    else:
-        link.symlink_to(outside, target_is_directory=True)
+    link_directory(link, outside)
 
     assert "No experiments found." in export(campaign)
+
+
+@pytest.mark.parametrize("command", ["list", "lineage"])
+def test_existing_commands_find_experiments_linked_within_campaign(tmp_path: Path, command: str) -> None:
+    storage = tmp_path / "storage"
+    Manifest(id="linked_baseline").save(storage / "sample")
+    link_directory(tmp_path / "experiments", storage)
+
+    result = CliRunner().invoke(cli, ["--root", str(tmp_path), command])
+    assert result.exit_code == 0, result.output
+    assert "linked_baseline" in result.output
+    assert "No experiments found." in export(tmp_path)

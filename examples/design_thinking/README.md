@@ -41,8 +41,8 @@ variable, and human scores. In `dt_v3`, the changed variable was
 | `text_accuracy` | 6 | 10 | +4 |
 | `visual_fidelity` | 9 | 8 | -1 |
 
-`Root` marks an experiment without a parent. An absent or empty score shows
-as `Missing`. The change is the child's score minus its parent's score.
+`Root` marks an experiment without a parent. An absent, empty, or whitespace-only
+score appears as `Missing`. The change is the child's score minus its parent's score.
 Both rubrics must have the same overall instructions and define the human-scored
 dimension once, with matching descriptions, numeric limits, and anchor labels
 at the same positions. Limits accept quoted numbers. Anchor positions accept
@@ -50,8 +50,13 @@ integers and their quoted equivalents. Ambiguous dimensions, invalid limits,
 or different scoring instructions give `Incomparable rubrics`.
 
 The exporter reads regular files in the campaign and skips symbolic links and
-Windows junctions. A rubric can be selected by its filename stem or declared
-name, including display names such as `How clear?`. Path references are rejected.
+Windows junctions. Select a rubric by its local filename (`Human Review.yaml`)
+or stem (`Human Review`). A stem reference like `Human Review` also matches
+`human_review.yaml` if the literal stem is absent. If no filename matches, a declared name
+such as `UX: Clarity` must identify one usable rubric. An ambiguous name, an
+unusable file, or a path reference leaves the rubric unavailable. The report
+keeps the recorded scores and marks the comparison `Incomparable rubrics`.
+
 An empty or duplicate experiment ID stops the export before it prints a report.
 In variable values, `\n` represents a line break, `\t` a tab, `\u0020` a
 leading, trailing, or repeated space, and `\\` a literal backslash. Other

@@ -13,13 +13,13 @@ from .manifest import Manifest, build_lineage
 from .rubric import Dimension, Rubric, load_rubric_by_name
 
 
-def _missing(value: object) -> bool:
-    return value is None or value == ""
+def _missing_score(value: object) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _code(value: object) -> str:
     """Keep manifest text literal and on one Markdown line."""
-    if _missing(value):
+    if value is None or value == "":
         return "Missing"
     # JSON escapes distinguish control characters from literal backslashes.
     text = re.sub(r"[\\\x00-\x1f\x7f-\x9f]|[^\S ]", lambda m: json.dumps(m[0])[1:-1], str(value))
@@ -32,6 +32,8 @@ def _code(value: object) -> str:
 
 
 def _score_text(value: object) -> str:
+    if _missing_score(value):
+        return "Missing"
     if type(value) in (float, int):
         return str(value)
     return _code(value)
@@ -84,7 +86,7 @@ def _human_scales(rubric: Rubric) -> dict[str, _Scale | None]:
 def _change(before: object, after: object, parent_scale: _Scale | None, scale: _Scale | None) -> str:
     if scale is None or parent_scale != scale:
         return "Incomparable rubrics"
-    if _missing(before) or _missing(after):
+    if _missing_score(before) or _missing_score(after):
         return "Missing score"
     try:
         old, new = Decimal(str(before)), Decimal(str(after))

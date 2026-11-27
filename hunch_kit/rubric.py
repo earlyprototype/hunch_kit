@@ -105,14 +105,15 @@ class Rubric:
 
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> Rubric:
-        dims_raw = data.pop("dimensions", [])
-        dimensions = [
-            Dimension(**d) if isinstance(d, dict) else d for d in dims_raw
-        ]
+        if not isinstance(data, dict):
+            raise ValueError("Expected a rubric mapping")
+        dims_raw = data.get("dimensions", [])
+        if not isinstance(dims_raw, list):
+            raise ValueError("Expected a list of rubric dimensions")
         return cls(
             name=data.get("name", ""),
             description=data.get("description", ""),
-            dimensions=dimensions,
+            dimensions=[Dimension(**d) for d in dims_raw],
         )
 
     # -- Queries --------------------------------------------------------------
@@ -140,16 +141,37 @@ def find_rubrics(rubric_dir: Path) -> list[Path]:
     )
 
 
+def _read_candidate(stream: TextIO) -> Rubric | None:
+    try:
+        rubric = Rubric.from_stream(stream)
+    except (yaml.YAMLError, TypeError, ValueError):
+        return None
+    if not isinstance(rubric.name, str) or not rubric.name.strip() or not rubric.dimensions:
+        return None
+    if any(not isinstance(d.name, str) or not d.name.strip() for d in rubric.dimensions):
+        return None
+    return rubric
+
+
 def load_rubric_by_name(rubric_dir: Path, name: str) -> Rubric | None:
-    """Match a rubric name against regular YAML files in the local directory."""
+    """Prefer a local filename or stem over a unique declared name."""
     if not isinstance(name, str) or not name.strip() or name in (".", ".."):
         return None
-    if re.search(r'[\\/:\x00-\x1f]', name):
+    if re.search(r'^[A-Za-z]:|[\\/\x00-\x1f]', name):
         return None
-    rubric_dir = Path(rubric_dir)
-    preferred = rubric_dir / (name.lower().replace(" ", "_") + ".yaml")
-    for path, stream in local_files(rubric_dir, "*.yaml", preferred=preferred):
-        rubric = Rubric.from_stream(stream)
-        if path == preferred or rubric.name.lower() == name.lower():
+    key = name.lower()
+    filename = name if key.endswith(".yaml") else name + ".yaml"
+    alias = key.replace(" ", "_")
+    stems, aliases, declared = [], [], []
+    for path, stream in local_files(rubric_dir, "*.yaml", preferred_name=filename):
+        rubric = _read_candidate(stream)
+        if path.name == filename or path.stem == name:
             return rubric
-    return None
+        if path.name.lower() == key or path.stem.lower() == key:
+            stems.append(rubric)
+        elif path.stem.lower() == alias:
+            aliases.append(rubric)
+        elif rubric is not None and rubric.name.lower() == key:
+            declared.append(rubric)
+    matches = stems or aliases or declared
+    return matches[0] if len(matches) == 1 else None

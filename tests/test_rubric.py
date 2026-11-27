@@ -170,6 +170,20 @@ class TestDiscovery:
         assert rubric is not None
         assert rubric.name == "How clear?"
 
+    def test_normalized_filename_precedes_declared_name(self, tmp_project: Path):
+        directory = tmp_project / "rubrics"
+        Rubric("Human Review", dimensions=[Dimension("other")]).save(directory).rename(directory / "a.yaml")
+        Rubric("Pinned", dimensions=[Dimension("quality")]).save(directory).rename(directory / "human_review.yaml")
+
+        assert load_rubric_by_name(directory, "Human Review").name == "Pinned"
+
+    def test_unusable_filename_does_not_fall_back_to_declared_name(self, tmp_project: Path):
+        directory = tmp_project / "rubrics"
+        Rubric("Draft", dimensions=[Dimension("quality")]).save(directory).rename(directory / "a.yaml")
+        (directory / "draft.yaml").write_text("name: Draft\ndimensions:\n", encoding="utf-8")
+
+        assert load_rubric_by_name(directory, "draft") is None
+
     def test_external_symlink_ignored_in_direct_and_declared_name_lookup(self, tmp_project: Path):
         rubric_dir = tmp_project / "rubrics"
         outside = Rubric(name="Other", dimensions=[Dimension("quality")]).save(tmp_project)

@@ -161,11 +161,20 @@ class Manifest:
 
 def find_experiments(root: Path) -> list[Path]:
     """Find all experiment directories under *root* that contain a manifest."""
-    return sorted(path.parent for path, _ in local_files(root, MANIFEST_FILENAME, recursive=True))
+    root = Path(root)
+    campaign = root.parent.resolve()
+    if not root.resolve().is_relative_to(campaign) or not root.is_dir():
+        return []
+    return sorted(
+        path.parent for path in root.rglob(MANIFEST_FILENAME)
+        if path.resolve().is_relative_to(campaign) and path.is_file()
+    )
 
 
-def load_all_manifests(root: Path) -> list[Manifest]:
-    """Load every manifest found under *root*."""
+def load_all_manifests(root: Path, *, local_only: bool = False) -> list[Manifest]:
+    """Load campaign manifests. Read only verified, unlinked files for an export."""
+    if not local_only:
+        return [Manifest.load(directory) for directory in find_experiments(root)]
     manifests = {
         path.parent: Manifest.from_stream(stream)
         for path, stream in local_files(root, MANIFEST_FILENAME, recursive=True)

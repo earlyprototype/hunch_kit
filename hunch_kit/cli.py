@@ -299,7 +299,7 @@ def scorecard(ctx: click.Context) -> None:
     """Write a Markdown scorecard comparing each experiment to its parent."""
     from .scorecard import render_scorecard
 
-    manifests = load_all_manifests(_experiments_dir(ctx))
+    manifests = load_all_manifests(_experiments_dir(ctx), local_only=True)
     try:
         config = ProjectConfig.load_local(_campaign_root(ctx))
         report = render_scorecard(manifests, _rubrics_dir(ctx), config.name)
