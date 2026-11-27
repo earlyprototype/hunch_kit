@@ -49,6 +49,9 @@ hunch lineage
 # root
 # └── ex_001_baseline
 #     └── ex_002_dark_mode
+
+# Export human scores and changes from each experiment's parent
+hunch scorecard > scorecard.md
 ```
 
 ---

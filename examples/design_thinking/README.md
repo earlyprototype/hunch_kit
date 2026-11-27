@@ -21,8 +21,31 @@ holds the exact fuji prompt used. Open the eval UI to see baseline-vs-current
 side by side with the prompt and the hand scores:
 
 ```bash
-hunch eval --project examples/design_thinking dt_v3
+hunch --root examples/design_thinking eval dt_v3
 ```
+
+## Export the scorecard
+
+Run this command from the repository root to save the Markdown scorecard.
+
+```bash
+hunch --root examples/design_thinking scorecard > scorecard.md
+```
+
+The command reads local manifests and rubrics and prints the report to standard
+output. Each experiment lists its parent and the variable changed. For
+`dt_v3`, the change to `heading_typography` raised text accuracy and lowered
+visual fidelity.
+
+| Dimension | Parent score (`dt_v2`) | Human score (`dt_v3`) | Change |
+| --- | --- | --- | --- |
+| `text_accuracy` | 6 | 10 | +4 |
+| `visual_fidelity` | 9 | 8 | -1 |
+
+`Root` marks an experiment without a parent. `Missing` marks an absent score.
+The change is the child's score minus its parent's score. Both rubrics must
+define a human-scored dimension with the same name, scale limits, and anchors.
+The report marks other dimensions as `Incomparable rubrics`.
 
 ## Why the title broke, and how one change fixed it
 
