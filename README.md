@@ -193,24 +193,27 @@ hunch_kit ships an MCP server for AI-assisted experiment management. Three capab
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    cli["hunch CLI"]
+    mcp["MCP server (tools, resources, prompts)"]
+
+    cli -->|run| runner["Experiment runner"]
+    mcp -->|run_experiment| runner
+    runner -->|calls| provider["Built-in or custom provider"]
+    runner -->|updates| manifest["Experiment manifest (experiment.yaml)"]
+
+    cli -->|init, list, lineage| manifest
+    mcp -->|tools and resources| manifest
+    mcp -->|tools and resources| rubric["Campaign rubrics"]
+    cli -->|eval| ui["FastAPI evaluation UI"]
+    ui -->|saves human scores| manifest
+    ui -->|loads| rubric
+    judge["Custom LLMJudge (optional)"] -->|scores a dimension from| rubric
 ```
-┌─────────────────────────────────────────────────────────┐
-│  CLI (hunch init / run / eval / list / lineage)         │
-├─────────────────────────────────────────────────────────┤
-│  MCP Server (tools / resources / prompts)               │
-├─────────────────────────────────────────────────────────┤
-│  Core Library                                           │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐ │
-│  │ manifest │ │  rubric  │ │  runner  │ │ providers │ │
-│  └──────────┘ └──────────┘ └──────────┘ └───────────┘ │
-├─────────────────────────────────────────────────────────┤
-│  Evaluation                                             │
-│  ┌──────────────────────┐ ┌───────────────────────────┐ │
-│  │ Web UI (FastAPI)     │ │ LLM Judge (optional)      │ │
-│  │ Side-by-side scoring │ │ Pluggable, bring your key │ │
-│  └──────────────────────┘ └───────────────────────────┘ │
-└─────────────────────────────────────────────────────────┘
-```
+
+For automated scoring, application code can implement the optional `LLMJudge` interface
+and call `score` with an output and a rubric dimension.
 
 ---
 
