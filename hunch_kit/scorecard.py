@@ -4,19 +4,25 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .manifest import Manifest, build_lineage
-from .rubric import Dimension, load_rubric_by_name
+from .rubric import Dimension, Rubric, load_rubric_by_name
+
+
+def _missing(value: object) -> bool:
+    return value is None or value == ""
 
 
 def _code(value: object) -> str:
     """Keep manifest text literal and on one Markdown line."""
-    if value is None or value == "":
+    if _missing(value):
         return "Missing"
     # JSON escapes distinguish control characters from literal backslashes.
-    text = re.sub(r"\\|[^\S ]", lambda m: json.dumps(m[0])[1:-1], str(value))
+    text = re.sub(r"[\\\x00-\x1f\x7f-\x9f]|[^\S ]", lambda m: json.dumps(m[0])[1:-1], str(value))
     text = re.sub(r"^ +| +$| {2,}", lambda m: r"\u0020" * len(m[0]), text)
     runs = re.findall(r"`+", text)
     if runs:
@@ -26,8 +32,6 @@ def _code(value: object) -> str:
 
 
 def _score_text(value: object) -> str:
-    if value is None:
-        return "Missing"
     if type(value) in (float, int):
         return str(value)
     return _code(value)
@@ -46,27 +50,47 @@ def _anchor_labels(dim: Dimension) -> dict[int, str] | None:
     return labels if len(labels) == len(dim.anchors) else None
 
 
-def _change(
-    before: object, after: object, parent_dim: Dimension | None, dim: Dimension | None,
-) -> str:
-    if parent_dim is None or dim is None:
+@dataclass(frozen=True)
+class _Scale:
+    rubric_description: str
+    dimension_description: str
+    minimum: Decimal
+    maximum: Decimal
+    anchors: dict[int, str]
+
+
+def _scale(rubric: Rubric, dim: Dimension) -> _Scale | None:
+    try:
+        minimum = Decimal(str(dim.scale_min))
+        maximum = Decimal(str(dim.scale_max))
+    except InvalidOperation:
+        return None
+    if not (minimum.is_finite() and maximum.is_finite() and minimum < maximum):
+        return None
+    labels = _anchor_labels(dim)
+    if labels is None:
+        return None
+    return _Scale(rubric.description, dim.description, minimum, maximum, labels)
+
+
+def _human_scales(rubric: Rubric) -> dict[str, _Scale | None]:
+    occurrences = Counter(dim.name for dim in rubric.dimensions)
+    return {
+        dim.name: _scale(rubric, dim) if occurrences[dim.name] == 1 else None
+        for dim in rubric.human_dimensions()
+    }
+
+
+def _change(before: object, after: object, parent_scale: _Scale | None, scale: _Scale | None) -> str:
+    if scale is None or parent_scale != scale:
         return "Incomparable rubrics"
-    parent_labels = _anchor_labels(parent_dim)
-    if (
-        parent_dim.description != dim.description
-        or parent_dim.scale_min != dim.scale_min
-        or parent_dim.scale_max != dim.scale_max
-        or parent_labels is None
-        or parent_labels != _anchor_labels(dim)
-    ):
-        return "Incomparable rubrics"
-    if before is None or after is None:
+    if _missing(before) or _missing(after):
         return "Missing score"
     try:
         old, new = Decimal(str(before)), Decimal(str(after))
     except InvalidOperation:
         return "Non-numeric score"
-    if not all(n.is_finite() and dim.scale_min <= n <= dim.scale_max for n in (old, new)):
+    if not all(n.is_finite() and scale.minimum <= n <= scale.maximum for n in (old, new)):
         return "Score outside scale"
     delta = new - old
     return f"{delta.normalize():+f}" if delta else "+0"
@@ -77,7 +101,7 @@ def _rubric_name(experiment: Manifest) -> str:
 
 
 def _experiment_section(
-    experiment: Manifest, parent: Manifest | None, rubrics: dict[str, dict[str, Dimension]],
+    experiment: Manifest, parent: Manifest | None, rubrics: dict[str, dict[str, _Scale | None]],
 ) -> list[str]:
     parent_label = _code(experiment.baseline) if experiment.baseline else "Root"
     if experiment.baseline and parent is None:
@@ -136,7 +160,7 @@ def render_scorecard(manifests: list[Manifest], rubrics_dir: Path, campaign_name
     for name in sorted({_rubric_name(m) for m in manifests} - {""}):
         rubric = load_rubric_by_name(rubrics_dir, name)
         if rubric is not None:
-            rubrics[name] = {d.name: d for d in rubric.human_dimensions()}
+            rubrics[name] = _human_scales(rubric)
 
     for root in sorted((m for m in manifests if not m.baseline), key=lambda m: m.id):
         lines.extend(_experiment_section(root, None, rubrics))

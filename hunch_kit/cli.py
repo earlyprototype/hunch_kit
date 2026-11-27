@@ -301,7 +301,8 @@ def scorecard(ctx: click.Context) -> None:
 
     manifests = load_all_manifests(_experiments_dir(ctx))
     try:
-        report = render_scorecard(manifests, _rubrics_dir(ctx), _project_config(ctx).name)
+        config = ProjectConfig.load_local(_campaign_root(ctx))
+        report = render_scorecard(manifests, _rubrics_dir(ctx), config.name)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(report if sys.stdout.isatty() else report.encode("utf-8"))

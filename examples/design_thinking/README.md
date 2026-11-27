@@ -32,28 +32,30 @@ Run this command from the repository root to save the Markdown scorecard.
 hunch --root examples/design_thinking scorecard > scorecard.md
 ```
 
-The command reads local manifests and rubrics. Redirected output uses UTF-8.
-Each experiment lists its parent and the variable changed. For
-`dt_v3`, the change to `heading_typography` raised text accuracy and lowered
-visual fidelity.
+The redirected report uses UTF-8. Each experiment lists its parent, changed
+variable, and human scores. In `dt_v3`, the changed variable was
+`heading_typography`.
 
 | Dimension | Parent score (`dt_v2`) | Human score (`dt_v3`) | Change |
 | --- | --- | --- | --- |
 | `text_accuracy` | 6 | 10 | +4 |
 | `visual_fidelity` | 9 | 8 | -1 |
 
-`Root` marks an experiment without a parent. `Missing` marks an absent score.
-The change is the child's score minus its parent's score. Both rubrics must
-define a human-scored dimension with the same name, description, scale limits,
-and anchor labels at the same positions. Integer positions and their numeric
-strings match. A difference in the scoring instructions, including on an
-unanchored scale, gives `Incomparable rubrics`.
+`Root` marks an experiment without a parent. An absent or empty score shows
+as `Missing`. The change is the child's score minus its parent's score.
+Both rubrics must have the same overall instructions and define the human-scored
+dimension once, with matching descriptions, numeric limits, and anchor labels
+at the same positions. Limits accept quoted numbers. Anchor positions accept
+integers and their quoted equivalents. Ambiguous dimensions, invalid limits,
+or different scoring instructions give `Incomparable rubrics`.
 
-Rubric names select regular YAML files in the campaign's `rubrics/` directory.
-Path references, symbolic links, and Windows junctions are unavailable.
+The exporter reads regular files in the campaign and skips symbolic links and
+Windows junctions. A rubric can be selected by its filename stem or declared
+name, including display names such as `How clear?`. Path references are rejected.
 An empty or duplicate experiment ID stops the export before it prints a report.
 In variable values, `\n` represents a line break, `\t` a tab, `\u0020` a
-leading, trailing, or repeated space, and `\\` a literal backslash.
+leading, trailing, or repeated space, and `\\` a literal backslash. Other
+controls also have visible escapes, such as `\u0000` for NUL.
 
 ## Why the title broke, and how one change fixed it
 

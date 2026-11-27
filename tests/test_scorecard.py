@@ -1,9 +1,13 @@
 """Offline scorecard checks through the public CLI."""
 
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -23,14 +27,28 @@ def section(report: str, experiment: str) -> str:
     return report.split(f"\n## `{experiment}`\n", 1)[1].partition("\n## ")[0]
 
 
+def export_bytes(campaign: Path, *, env: dict[str, str] | None = None) -> bytes:
+    result = subprocess.run(
+        [sys.executable, "-c", "from hunch_kit.cli import cli; cli()",
+         "--root", str(campaign), "scorecard"],
+        env=env, capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
 def test_design_thinking_export_is_repeatable_and_read_only() -> None:
     campaign = Path(__file__).resolve().parents[1] / "examples" / "design_thinking"
-    sources = sorted(campaign.rglob("*.yaml"))
-    before = [path.read_bytes() for path in sources]
 
-    report = export(campaign)
-    assert export(campaign) == report
-    assert [path.read_bytes() for path in sources] == before
+    def contents():
+        return {p: hashlib.sha256(p.read_bytes()).digest() for p in campaign.rglob("*") if p.is_file()}
+
+    before = contents()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        reports = list(pool.map(export_bytes, [campaign] * 3))
+    assert reports[0] == reports[1] == reports[2]
+    assert contents() == before
+    report = reports[0].decode("utf-8")
     assert str(campaign) not in report
     assert "# Campaign scorecard: `design_thinking`" in report
     baseline = section(report, "dt_v1")
@@ -122,6 +140,75 @@ def test_missing_rubric_and_parent_preserve_recorded_scores(tmp_project: Path) -
     assert "| `detail` | 4 | 6 | Incomparable rubrics |" in section(report, "b")
 
 
+def test_opposite_rubric_instructions_prevent_a_delta(tmp_project: Path) -> None:
+    for experiment, parent, rubric, instructions, score in [
+        ("a", "", "First", "10 is best", 6),
+        ("b", "a", "Second", "1 is best", 8),
+    ]:
+        Rubric(rubric, instructions, [Dimension("clarity")]).save(tmp_project / "rubrics")
+        Manifest(id=experiment, baseline=parent, rubric=rubric, human_scores={"clarity": score}).save(
+            tmp_project / "experiments" / experiment
+        )
+
+    assert "| `clarity` | 6 | 8 | Incomparable rubrics |" in section(export(tmp_project), "b")
+
+
+def test_duplicate_dimension_prevents_only_its_own_delta(tmp_project: Path) -> None:
+    Rubric(name="Review", dimensions=[
+        Dimension("clarity", scale_max=5), Dimension("clarity"), Dimension("tone"),
+    ]).save(tmp_project / "rubrics")
+    for experiment, parent, score in [("a", "", 2), ("b", "a", 8)]:
+        Manifest(id=experiment, baseline=parent, rubric="Review", human_scores={
+            "clarity": score, "tone": score,
+        }).save(tmp_project / "experiments" / experiment)
+
+    child = section(export(tmp_project), "b")
+    assert "| `clarity` | 2 | 8 | Incomparable rubrics |" in child
+    assert "| `tone` | 2 | 8 | +6 |" in child
+
+
+@pytest.mark.parametrize(("low", "high", "change"), [
+    ('"1"', '"10"', "+2"),
+    ("1", "10", "+2"),
+    ('"small"', '"large"', "Incomparable rubrics"),
+    ("null", "10", "Incomparable rubrics"),
+    ("10", "1", "Incomparable rubrics"),
+    (".nan", ".inf", "Incomparable rubrics"),
+])
+def test_scale_bounds_are_numeric_and_finite(tmp_project: Path, low, high, change) -> None:
+    directory = tmp_project / "rubrics"
+    for name, minimum, maximum in [("First", '"1"', '"10"'), ("Second", low, high)]:
+        (directory / f"{name}.yaml").write_text(
+            f"name: {name}\ndimensions:\n- name: quality\n  scale_min: {minimum}\n"
+            f"  scale_max: {maximum}\n- name: tone\n", encoding="utf-8",
+        )
+    for experiment, parent, rubric, score in [
+        ("a", "", "First", 6), ("b", "a", "Second", 8), ("c", "b", "Second", 10),
+    ]:
+        Manifest(id=experiment, baseline=parent, rubric=rubric, human_scores={
+            "quality": score, "tone": score,
+        }).save(tmp_project / "experiments" / experiment)
+
+    report = export(tmp_project)
+    child = section(report, "b")
+    assert f"| `quality` | 6 | 8 | {change} |" in child
+    assert "| `tone` | 6 | 8 | +2 |" in child
+    assert f"| `quality` | 8 | 10 | {change} |" in section(report, "c")
+
+
+def test_blank_score_and_zero(tmp_project: Path) -> None:
+    Rubric(name="Review", dimensions=[Dimension("quality", scale_min=0)]).save(tmp_project / "rubrics")
+    for experiment, parent, score in [("a", "", 3), ("b", "a", ""), ("c", "b", 0), ("d", "a", 0)]:
+        Manifest(id=experiment, baseline=parent, rubric="Review", human_scores={"quality": score}).save(
+            tmp_project / "experiments" / experiment
+        )
+
+    report = export(tmp_project)
+    assert "| `quality` | 3 | Missing | Missing score |" in section(report, "b")
+    assert "| `quality` | Missing | 0 | Missing score |" in section(report, "c")
+    assert "| `quality` | 3 | 0 | -3 |" in section(report, "d")
+
+
 def test_external_rubric_reported_as_unavailable(tmp_project: Path) -> None:
     Rubric(name="Other", dimensions=[Dimension("detail")]).save(tmp_project)
     Manifest(id="sample", rubric="../other").save(tmp_project / "experiments" / "sample")
@@ -207,11 +294,79 @@ def test_redirected_report_uses_utf8(tmp_project: Path) -> None:
     Manifest(id="sample", variable_changed="label", variable_value="見出し").save(
         tmp_project / "experiments" / "sample"
     )
-    result = subprocess.run(
-        [sys.executable, "-c", "from hunch_kit.cli import cli; cli()",
-         "--root", str(tmp_project), "scorecard"],
+    report = export_bytes(
+        tmp_project,
         env={**os.environ, "PYTHONUTF8": "0", "PYTHONIOENCODING": "cp1252:strict"},
-        capture_output=True,
     )
-    assert result.returncode == 0, result.stderr
-    assert "Changed variable: `label` = `見出し`".encode("utf-8") in result.stdout
+    assert "Changed variable: `label` = `見出し`".encode("utf-8") in report
+
+
+def test_control_characters_are_visible_in_report_bytes(tmp_project: Path) -> None:
+    path = Manifest(id="sample", variable_changed="label").save(tmp_project / "experiments" / "sample")
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(r'variable_value: "A\0B\aC\x7fD\x87E\\u0000"' + "\n")
+
+    result = CliRunner().invoke(cli, ["--root", str(tmp_project), "scorecard"])
+    assert result.exit_code == 0
+    assert rb"`A\u0000B\u0007C\u007fD\u0087E\\u0000`" in result.stdout_bytes
+    assert b"\x00" not in result.stdout_bytes
+
+
+def test_linked_manifest_is_skipped(tmp_path: Path) -> None:
+    campaign = tmp_path / "campaign"
+    experiments = campaign / "experiments"
+    outside = Manifest(id="outside").save(tmp_path / "other")
+    local = Manifest(id="local").save(experiments / "group" / "local")
+    link = experiments / "alias" / local.name
+    link.parent.mkdir()
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Creating file symlinks requires Windows symlink privileges")
+        raise
+
+    report = export(campaign)
+    assert "## `local`" in report
+    assert "outside" not in report
+
+
+def test_reparse_files_are_excluded_by_open_handle(tmp_project: Path, monkeypatch) -> None:
+    # Simulate reparse metadata on the opened files even when directory entries
+    # look ordinary. This also runs on systems without file symlink privileges.
+    config = tmp_project / "hunch_project.yaml"
+    config.write_text("name: hidden_title\n", encoding="utf-8")
+    rubric = Rubric(name="Review", dimensions=[Dimension("quality")]).save(tmp_project / "rubrics")
+    experiments = tmp_project / "experiments"
+    hidden = Manifest(id="hidden_experiment").save(experiments / "hidden")
+    Manifest(id="local", rubric="Review").save(experiments / "local")
+    marked = [path.stat() for path in (config, rubric, hidden)]
+    fstat = os.fstat
+
+    def read_handle(fd):
+        info = fstat(fd)
+        if any(os.path.samestat(info, target) for target in marked):
+            return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        return info
+
+    monkeypatch.setattr(os, "fstat", read_handle)
+    report = export(tmp_project)
+    assert report.startswith("# Campaign scorecard\n")
+    assert "hidden_experiment" not in report
+    assert "Rubric: `Review` (unavailable)" in section(report, "local")
+
+
+@pytest.mark.parametrize("relative_link", ["experiments", "experiments/group"])
+def test_linked_experiment_directories_are_skipped(tmp_path: Path, relative_link: str) -> None:
+    campaign = tmp_path / "campaign"
+    link = campaign / relative_link
+    link.parent.mkdir(parents=True)
+    outside = tmp_path / "other" / "experiments"
+    Manifest(id="outside").save(outside / "sample")
+    if os.name == "nt":
+        from _winapi import CreateJunction
+        CreateJunction(str(outside), str(link))
+    else:
+        link.symlink_to(outside, target_is_directory=True)
+
+    assert "No experiments found." in export(campaign)

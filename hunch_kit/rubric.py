@@ -10,11 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 import re
-import stat
-from typing import Any
+from typing import Any, TextIO
 
 import yaml
 
+from ._local_files import local_files
 
 RUBRIC_DIR_NAME = "rubrics"
 
@@ -96,9 +96,12 @@ class Rubric:
 
     @classmethod
     def load(cls, path: Path) -> Rubric:
-        path = Path(path)
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return cls._from_dict(data)
+        with Path(path).open(encoding="utf-8") as stream:
+            return cls.from_stream(stream)
+
+    @classmethod
+    def from_stream(cls, stream: TextIO) -> Rubric:
+        return cls._from_dict(yaml.safe_load(stream) or {})
 
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> Rubric:
@@ -137,34 +140,16 @@ def find_rubrics(rubric_dir: Path) -> list[Path]:
     )
 
 
-def _local_mode(path: Path) -> int:
-    """Inspect the directory entry without following links or Windows junctions."""
-    try:
-        entry = path.lstat()
-    except (FileNotFoundError, NotADirectoryError):
-        return 0
-    if getattr(entry, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
-        return 0
-    return entry.st_mode
-
-
 def load_rubric_by_name(rubric_dir: Path, name: str) -> Rubric | None:
     """Match a rubric name against regular YAML files in the local directory."""
     if not isinstance(name, str) or not name.strip() or name in (".", ".."):
         return None
-    if re.search(r'[\\/:<>"|?*\x00-\x1f]', name):
+    if re.search(r'[\\/:\x00-\x1f]', name):
         return None
     rubric_dir = Path(rubric_dir)
-    if not stat.S_ISDIR(_local_mode(rubric_dir)):
-        return None
-
     preferred = rubric_dir / (name.lower().replace(" ", "_") + ".yaml")
-    # Check the conventional filename first, then match declared names.
-    candidates = sorted(rubric_dir.glob("*.yaml"), key=lambda path: (path != preferred, path))
-    for path in candidates:
-        if not stat.S_ISREG(_local_mode(path)):
-            continue
-        rubric = Rubric.load(path)
+    for path, stream in local_files(rubric_dir, "*.yaml", preferred=preferred):
+        rubric = Rubric.from_stream(stream)
         if path == preferred or rubric.name.lower() == name.lower():
             return rubric
     return None

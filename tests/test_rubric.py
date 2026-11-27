@@ -160,6 +160,16 @@ class TestDiscovery:
 
         assert load_rubric_by_name(rubric_dir, "human review").name == "Human Review"
 
+    def test_lookup_by_punctuated_display_name(self, tmp_project: Path):
+        directory = tmp_project / "rubrics"
+        (directory / "clarity.yaml").write_text(
+            "name: 'How clear?'\ndimensions:\n- name: clarity\n", encoding="utf-8",
+        )
+
+        rubric = load_rubric_by_name(directory, "how clear?")
+        assert rubric is not None
+        assert rubric.name == "How clear?"
+
     def test_external_symlink_ignored_in_direct_and_declared_name_lookup(self, tmp_project: Path):
         rubric_dir = tmp_project / "rubrics"
         outside = Rubric(name="Other", dimensions=[Dimension("quality")]).save(tmp_project)

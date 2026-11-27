@@ -11,9 +11,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import yaml
+
+from ._local_files import local_files
 
 PROJECT_FILENAME = "hunch_project.yaml"
 
@@ -51,7 +53,19 @@ class ProjectConfig:
         path = Path(campaign_root) / PROJECT_FILENAME
         if not path.is_file():
             return cls()
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        with path.open(encoding="utf-8") as stream:
+            return cls._from_stream(stream)
+
+    @classmethod
+    def load_local(cls, campaign_root: Path) -> ProjectConfig:
+        """Read campaign metadata for an export confined to local files."""
+        for _, stream in local_files(campaign_root, PROJECT_FILENAME):
+            return cls._from_stream(stream)
+        return cls()
+
+    @classmethod
+    def _from_stream(cls, stream: TextIO) -> ProjectConfig:
+        data = yaml.safe_load(stream) or {}
         known = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in data.items() if k in known})
 
