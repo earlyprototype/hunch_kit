@@ -299,10 +299,11 @@ def scorecard(ctx: click.Context) -> None:
     """Write a Markdown scorecard comparing each experiment to its parent."""
     from .scorecard import render_scorecard
 
-    manifests = load_all_manifests(_experiments_dir(ctx), local_only=True)
+    campaign = resolve_campaign_root(explicit=ctx.obj.get("explicit_root"), local_only=True)
+    manifests = load_all_manifests(campaign / "experiments", local_only=True)
     try:
-        config = ProjectConfig.load_local(_campaign_root(ctx))
-        report = render_scorecard(manifests, _rubrics_dir(ctx), config.name)
+        config = ProjectConfig.load_local(campaign)
+        report = render_scorecard(manifests, campaign / "rubrics", config.name)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(report if sys.stdout.isatty() else report.encode("utf-8"))

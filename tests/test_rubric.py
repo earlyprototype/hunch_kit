@@ -184,18 +184,23 @@ class TestDiscovery:
 
         assert load_rubric_by_name(directory, "draft") is None
 
-    def test_external_symlink_ignored_in_direct_and_declared_name_lookup(self, tmp_project: Path):
-        rubric_dir = tmp_project / "rubrics"
-        outside = Rubric(name="Other", dimensions=[Dimension("quality")]).save(tmp_project)
+    @pytest.mark.parametrize("in_campaign", [False, True])
+    def test_file_link_in_direct_and_declared_name_lookup(self, tmp_path: Path, in_campaign: bool):
+        campaign = tmp_path / "campaign"
+        rubric_dir = campaign / "rubrics"
+        rubric_dir.mkdir(parents=True)
+        rubric = Rubric(name="Other", dimensions=[Dimension("quality")])
+        target = rubric.save(campaign if in_campaign else tmp_path)
         try:
-            (rubric_dir / "alias.yaml").symlink_to(outside)
+            (rubric_dir / "alias.yaml").symlink_to(target)
         except OSError as exc:
             if getattr(exc, "winerror", None) == 1314:
                 pytest.skip("Creating file symlinks requires Windows symlink privileges")
             raise
 
-        assert load_rubric_by_name(rubric_dir, "alias") is None
-        assert load_rubric_by_name(rubric_dir, "Other") is None
+        for reference in ("alias", "Other"):
+            assert load_rubric_by_name(rubric_dir, reference) == (rubric if in_campaign else None)
+            assert load_rubric_by_name(rubric_dir, reference, local_only=True) is None
 
     def test_linked_rubrics_directory_is_unavailable(self, tmp_path: Path):
         directory = tmp_path / "campaign" / "rubrics"

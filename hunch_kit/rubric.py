@@ -14,7 +14,7 @@ from typing import Any, TextIO
 
 import yaml
 
-from ._local_files import local_files
+from ._local_files import directory_entries, local_directory, local_text_file
 
 RUBRIC_DIR_NAME = "rubrics"
 
@@ -141,10 +141,18 @@ def find_rubrics(rubric_dir: Path) -> list[Path]:
     )
 
 
-def _read_candidate(stream: TextIO) -> Rubric | None:
+def _read_candidate(campaign: Path, path: Path, local_only: bool) -> Rubric | None:
     try:
-        rubric = Rubric.from_stream(stream)
-    except (yaml.YAMLError, TypeError, ValueError):
+        if not local_only:
+            path = path.resolve(strict=True)
+        with local_directory(campaign, path.parent) as fd:
+            if fd is None:
+                return None
+            with local_text_file(path, fd) as stream:
+                if stream is None:
+                    return None
+                rubric = Rubric.from_stream(stream)
+    except (OSError, RuntimeError, yaml.YAMLError, TypeError, ValueError):
         return None
     if not isinstance(rubric.name, str) or not rubric.name.strip() or not rubric.dimensions:
         return None
@@ -153,25 +161,62 @@ def _read_candidate(stream: TextIO) -> Rubric | None:
     return rubric
 
 
-def load_rubric_by_name(rubric_dir: Path, name: str) -> Rubric | None:
-    """Prefer a local filename or stem over a unique declared name."""
+def _candidate_paths(directory: Path, fd: int, local_only: bool) -> list[Path]:
+    paths = []
+    for entry in directory_entries(directory, fd):
+        path = directory / entry.name
+        if not path.match("*.yaml"):
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False) and (local_only or not entry.is_symlink()):
+                continue
+        except OSError:
+            # Retain the filename's precedence. Opening it will verify its type.
+            pass
+        paths.append(path)
+    return paths
+
+
+def load_rubric_by_name(rubric_dir: Path, name: str, *, local_only: bool = False) -> Rubric | None:
+    """Prefer a filename or stem over a unique declared name.
+
+    Evaluation accepts links to verified targets inside the campaign.
+    A local-only lookup excludes links throughout the rubric path.
+    """
     if not isinstance(name, str) or not name.strip() or name in (".", ".."):
         return None
     if re.search(r'^[A-Za-z]:|[\\/\x00-\x1f]', name):
         return None
+    directory = Path(rubric_dir).absolute()
+    campaign = directory.parent
+    try:
+        if not local_only:
+            campaign = campaign.resolve(strict=True)
+            directory = directory.resolve(strict=True)
+        with local_directory(campaign, directory) as fd:
+            if fd is None:
+                return None
+            candidates = _candidate_paths(directory, fd, local_only)
+    except (OSError, RuntimeError):
+        return None
+
     key = name.lower()
     filename = name if key.endswith(".yaml") else name + ".yaml"
     alias = key.replace(" ", "_")
-    stems, aliases, declared = [], [], []
-    for path, stream in local_files(rubric_dir, "*.yaml", preferred_name=filename):
-        rubric = _read_candidate(stream)
-        if path.name == filename or path.stem == name:
-            return rubric
-        if path.name.lower() == key or path.stem.lower() == key:
-            stems.append(rubric)
-        elif path.stem.lower() == alias:
-            aliases.append(rubric)
-        elif rubric is not None and rubric.name.lower() == key:
-            declared.append(rubric)
-    matches = stems or aliases or declared
-    return matches[0] if len(matches) == 1 else None
+    matches = (
+        [p for p in candidates if p.name == filename]
+        or [p for p in candidates if p.stem == name]
+        or [p for p in candidates if p.name.lower() == key or p.stem.lower() == key]
+        or [p for p in candidates if p.stem.lower() == alias]
+    )
+    if matches:
+        return _read_candidate(campaign, matches[0], local_only) if len(matches) == 1 else None
+
+    declared = None
+    for path in candidates:
+        rubric = _read_candidate(campaign, path, local_only)
+        if rubric is not None and rubric.name.lower() == key:
+            if declared is not None:
+                return None
+            declared = rubric
+    return declared

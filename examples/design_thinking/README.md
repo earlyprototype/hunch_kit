@@ -54,8 +54,12 @@ Windows junctions. Select a rubric by its local filename (`Human Review.yaml`)
 or stem (`Human Review`). A stem reference like `Human Review` also matches
 `human_review.yaml` if the literal stem is absent. If no filename matches, a declared name
 such as `UX: Clarity` must identify one usable rubric. An ambiguous name, an
-unusable file, or a path reference leaves the rubric unavailable. The report
+unreadable or invalid file, or a path reference leaves the rubric unavailable. The report
 keeps the recorded scores and marks the comparison `Incomparable rubrics`.
+
+Without `--root`, the scorecard searches upward for a regular
+`hunch_project.yaml` and skips linked markers. The evaluation UI and MCP rubric
+lookup can use rubric links whose targets are inside the campaign.
 
 An empty or duplicate experiment ID stops the export before it prints a report.
 In variable values, `\n` represents a line break, `\t` a tab, `\u0020` a

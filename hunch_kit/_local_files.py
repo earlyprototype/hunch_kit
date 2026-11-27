@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import errno
 import os
 from pathlib import Path
@@ -55,25 +55,62 @@ def _local_fd(path: Path, parent_fd: int | None, *, directory: bool) -> Iterator
         os.close(fd)
 
 
-def local_files(
-    root: Path, pattern: str, *, recursive: bool = False, preferred_name: str | None = None,
-) -> Iterator[tuple[Path, TextIO]]:
+def is_local_file(path: Path) -> bool:
+    """Check a project marker without following its target."""
+    try:
+        if os.name != "nt":
+            return stat.S_ISREG(path.lstat().st_mode)
+        # Windows lstat can follow some kinds of reparse points.
+        with _local_fd(path, None, directory=False) as fd:
+            return fd is not None
+    except OSError:
+        return False
+
+
+@contextmanager
+def local_directory(root: Path, directory: Path) -> Iterator[int | None]:
+    """Hold unlinked directories from the campaign root to a lookup directory."""
+    if not directory.is_relative_to(root) or ".." in directory.parts:
+        yield None
+        return
+    with ExitStack() as stack:
+        path = root
+        fd = stack.enter_context(_local_fd(path, None, directory=True))
+        for part in directory.relative_to(root).parts:
+            if fd is None:
+                break
+            path = path / part
+            fd = stack.enter_context(_local_fd(path, fd, directory=True))
+        yield fd
+
+
+def directory_entries(directory: Path, fd: int) -> list[os.DirEntry]:
+    with os.scandir(directory if os.name == "nt" else fd) as scan:
+        return sorted(scan, key=lambda entry: entry.name)
+
+
+@contextmanager
+def local_text_file(path: Path, parent_fd: int) -> Iterator[TextIO | None]:
+    with _local_fd(path, parent_fd, directory=False) as fd:
+        if fd is None:
+            yield None
+        else:
+            with open(fd, encoding="utf-8", closefd=False) as stream:
+                yield stream
+
+
+def local_files(root: Path, pattern: str, *, recursive: bool = False) -> Iterator[tuple[Path, TextIO]]:
     """Yield a path and its verified UTF-8 stream for the current iteration."""
     def walk(directory: Path, parent_fd: int | None) -> Iterator[tuple[Path, TextIO]]:
         with _local_fd(directory, parent_fd, directory=True) as dir_fd:
             if dir_fd is None:
                 return
-            with os.scandir(directory if os.name == "nt" else dir_fd) as scan:
-                entries = sorted(scan, key=lambda entry: entry.name)
-            if preferred_name is not None:
-                entries.sort(key=lambda entry: entry.name != preferred_name)
-            for entry in entries:
+            for entry in directory_entries(directory, dir_fd):
                 path = directory / entry.name
                 if path.match(pattern) and entry.is_file(follow_symlinks=False):
-                    with _local_fd(path, dir_fd, directory=False) as fd:
-                        if fd is not None:
-                            with open(fd, encoding="utf-8", closefd=False) as stream:
-                                yield path, stream
+                    with local_text_file(path, dir_fd) as stream:
+                        if stream is not None:
+                            yield path, stream
                 elif recursive and entry.is_dir(follow_symlinks=False):
                     yield from walk(path, dir_fd)
 

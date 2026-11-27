@@ -1,19 +1,24 @@
 """Offline scorecard checks through the public CLI."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
 import hashlib
+import json
 import os
 from pathlib import Path
 import stat
 import subprocess
 import sys
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 
+from hunch_kit import _local_files
 from hunch_kit.cli import cli
 from hunch_kit.manifest import Manifest
+from hunch_kit.project import PROJECT_FILENAME, ProjectConfig
 from hunch_kit.rubric import Dimension, Rubric
 
 
@@ -232,6 +237,64 @@ def test_duplicate_dimension_prevents_only_its_own_delta(tmp_project: Path) -> N
     assert "| `tone` | 2 | 8 | +6 |" in child
 
 
+@contextmanager
+def deny_read(monkeypatch, locked: Path):
+    """Hold a Windows sharing lock, or simulate the same read error on POSIX."""
+    open_entry = _local_files._open_entry
+    attempts = []
+
+    def open_unless_locked(path, parent_fd, directory):
+        if path == locked:
+            attempts.append(path)
+            if os.name != "nt":
+                raise PermissionError("rubric is locked")
+        return open_entry(path, parent_fd, directory)
+
+    with ExitStack() as stack:
+        if os.name == "nt":
+            import _winapi
+            handle = _winapi.CreateFile(str(locked), _winapi.GENERIC_READ, 0, 0, _winapi.OPEN_EXISTING, 0, 0)
+            stack.callback(_winapi.CloseHandle, handle)
+        stack.enter_context(monkeypatch.context()).setattr(_local_files, "_open_entry", open_unless_locked)
+        yield attempts
+
+
+def test_unreadable_selected_rubric_keeps_scores_and_other_comparisons(tmp_project: Path, monkeypatch):
+    directory = tmp_project / "rubrics"
+    locked = Rubric("Locked", dimensions=[Dimension("clarity")]).save(directory)
+    Rubric("Review", dimensions=[Dimension("clarity")]).save(directory).rename(directory / "published.yaml")
+    # A matching declared name cannot substitute for an unreadable filename.
+    (directory / "alternate.yaml").write_bytes(locked.read_bytes())
+    for experiment, parent, reference, score in [
+        ("baseline", "", "Review", 2), ("revision", "baseline", "Review", 4),
+        ("affected", "baseline", "Locked", 3),
+    ]:
+        Manifest(id=experiment, baseline=parent, rubric=reference, human_scores={"clarity": score}).save(
+            tmp_project / "experiments" / experiment
+        )
+    with deny_read(monkeypatch, locked):
+        report = export(tmp_project)
+    affected = section(report, "affected")
+    assert "Rubric: `Locked` (unavailable)" in affected
+    assert "| `clarity` | 2 | 3 | Incomparable rubrics |" in affected
+    assert "| `clarity` | 2 | 4 | +2 |" in section(report, "revision")
+
+
+@pytest.mark.parametrize("reference", ["Human Review", "HUMAN_REVIEW.yaml", "Human_Review"])
+def test_filename_lookup_does_not_open_unrelated_draft(tmp_project: Path, monkeypatch, reference: str):
+    directory = tmp_project / "rubrics"
+    Rubric("Human Review", dimensions=[Dimension("clarity")]).save(directory)
+    draft = Rubric("Draft", dimensions=[Dimension("clarity")]).save(directory)
+    for experiment, parent, score in [("baseline", "", 2), ("child", "baseline", 4)]:
+        Manifest(id=experiment, baseline=parent, rubric=reference, human_scores={"clarity": score}).save(
+            tmp_project / "experiments" / experiment
+        )
+    with deny_read(monkeypatch, draft) as attempts:
+        report = export(tmp_project)
+    assert "| `clarity` | 2 | 4 | +2 |" in section(report, "child")
+    assert attempts == []
+
+
 @pytest.mark.parametrize(("low", "high", "change"), [
     ('"1"', '"10"', "+2"),
     ("1", "10", "+2"),
@@ -397,16 +460,9 @@ def test_linked_manifest_is_skipped(tmp_path: Path) -> None:
     assert "outside" not in report
 
 
-def test_reparse_files_are_excluded_by_open_handle(tmp_project: Path, monkeypatch) -> None:
-    # Simulate reparse metadata on the opened files even when directory entries
-    # look ordinary. This also runs on systems without file symlink privileges.
-    config = tmp_project / "hunch_project.yaml"
-    config.write_text("name: hidden_title\n", encoding="utf-8")
-    rubric = Rubric(name="Review", dimensions=[Dimension("quality")]).save(tmp_project / "rubrics")
-    experiments = tmp_project / "experiments"
-    hidden = Manifest(id="hidden_experiment").save(experiments / "hidden")
-    Manifest(id="local", rubric="Review").save(experiments / "local")
-    marked = [path.stat() for path in (config, rubric, hidden)]
+def mark_reparse_handles(monkeypatch, *paths: Path) -> None:
+    # Directory entries look ordinary, but the opened handles report a reparse point.
+    marked = [path.stat() for path in paths]
     fstat = os.fstat
 
     def read_handle(fd):
@@ -416,6 +472,16 @@ def test_reparse_files_are_excluded_by_open_handle(tmp_project: Path, monkeypatc
         return info
 
     monkeypatch.setattr(os, "fstat", read_handle)
+
+
+def test_reparse_files_are_excluded_by_open_handle(tmp_project: Path, monkeypatch) -> None:
+    config = tmp_project / "hunch_project.yaml"
+    config.write_text("name: hidden_title\n", encoding="utf-8")
+    rubric = Rubric(name="Review", dimensions=[Dimension("quality")]).save(tmp_project / "rubrics")
+    experiments = tmp_project / "experiments"
+    hidden = Manifest(id="hidden_experiment").save(experiments / "hidden")
+    Manifest(id="local", rubric="Review").save(experiments / "local")
+    mark_reparse_handles(monkeypatch, config, rubric, hidden)
     report = export(tmp_project)
     assert report.startswith("# Campaign scorecard\n")
     assert "hidden_experiment" not in report
@@ -428,6 +494,70 @@ def link_directory(link: Path, target: Path) -> None:
         CreateJunction(str(target), str(link))
     else:
         link.symlink_to(target, target_is_directory=True)
+
+
+def test_linked_rubrics_work_for_evaluation_and_are_excluded_from_export(tmp_path: Path, monkeypatch):
+    from hunch_kit.evaluation.human import _load_rubric_for
+    from hunch_kit.rubric import find_rubrics
+
+    storage = tmp_path / "storage" / "rubrics"
+    rubric = Rubric("Review", dimensions=[Dimension("clarity")])
+    rubric.save(storage)
+    directory = tmp_path / "rubrics"
+    link_directory(directory, storage)
+    experiment = Manifest(id="sample", rubric="Review")
+    experiment.save(tmp_path / "experiments" / "sample")
+
+    assert [p.name for p in find_rubrics(directory)] == ["review.yaml"]
+    assert _load_rubric_for(experiment, directory) == rubric
+    assert "Rubric: `Review` (unavailable)" in section(export(tmp_path), "sample")
+
+    # Invoke the registered resource without installing the optional MCP server.
+    with patch.dict(sys.modules, {"mcp.server.fastmcp": SimpleNamespace(FastMCP=object)}):
+        from hunch_kit_mcp.resources import register_resources
+
+    handlers = {}
+
+    def resource(uri):
+        return lambda handler: handlers.setdefault(uri, handler)
+
+    monkeypatch.setenv("HUNCH_KIT_WORKSPACE", str(tmp_path))
+    register_resources(SimpleNamespace(resource=resource))
+    detail = json.loads(handlers["rubric://{name}"]("Review"))
+    assert detail == rubric.to_dict()
+
+
+@pytest.mark.parametrize("marker_kind", ["link", "reparse_file"] if os.name == "nt" else ["link"])
+def test_implicit_scorecard_skips_linked_project_marker(tmp_path, monkeypatch, marker_kind):
+    campaign = tmp_path / "campaign"
+    ProjectConfig(name="outer").save(campaign)
+    nested = campaign / "nested"
+    start = nested / "work"
+    start.mkdir(parents=True)
+    marker = nested / PROJECT_FILENAME
+    if marker_kind == "link":
+        target = ProjectConfig(name="other").save(tmp_path / "other")
+        try:
+            marker.symlink_to(target)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != 1314:
+                raise
+            link_directory(marker, target.parent)
+    else:
+        marker.touch()
+        mark_reparse_handles(monkeypatch, marker)
+    monkeypatch.chdir(start)
+    path_stat = Path.stat
+
+    def check_marker(path, *, follow_symlinks=True):
+        if path == marker:
+            assert not follow_symlinks, "discovery followed the nested project marker"
+        return path_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", check_marker)
+    result = CliRunner().invoke(cli, ["scorecard"])
+    assert result.exit_code == 0, result.exception
+    assert "# Campaign scorecard: `outer`" in result.output
 
 
 @pytest.mark.parametrize("relative_link", ["experiments", "experiments/group"])

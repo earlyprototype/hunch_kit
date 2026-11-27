@@ -15,7 +15,7 @@ from typing import Any, TextIO
 
 import yaml
 
-from ._local_files import local_files
+from ._local_files import is_local_file, local_files
 
 PROJECT_FILENAME = "hunch_project.yaml"
 
@@ -70,15 +70,15 @@ class ProjectConfig:
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
-def find_project_root(start: Path | None = None) -> Path | None:
+def find_project_root(start: Path | None = None, *, local_only: bool = False) -> Path | None:
     """Walk upward from *start* (or cwd) until ``hunch_project.yaml`` is found.
 
-    Returns the directory containing the file, or ``None`` if not found.
+    A local-only search skips linked markers. Returns ``None`` if not found.
     """
     current = Path(start or Path.cwd()).resolve()
+    is_marker = is_local_file if local_only else Path.is_file
     for parent in [current, *current.parents]:
-        candidate = parent / PROJECT_FILENAME
-        if candidate.is_file():
+        if is_marker(parent / PROJECT_FILENAME):
             return parent
     return None
 
@@ -87,6 +87,7 @@ def resolve_campaign_root(
     *,
     explicit: str | Path | None = None,
     start: Path | None = None,
+    local_only: bool = False,
 ) -> Path:
     """Resolve the campaign directory.
 
@@ -96,7 +97,7 @@ def resolve_campaign_root(
     """
     if explicit is not None and str(explicit).strip():
         return Path(explicit).expanduser().resolve()
-    found = find_project_root(start or Path.cwd())
+    found = find_project_root(start or Path.cwd(), local_only=local_only)
     if found is not None:
         return found
     return Path.cwd().resolve()

@@ -160,7 +160,7 @@ def render_scorecard(manifests: list[Manifest], rubrics_dir: Path, campaign_name
     lines = [title]
     rubrics = {}
     for name in sorted({_rubric_name(m) for m in manifests} - {""}):
-        rubric = load_rubric_by_name(rubrics_dir, name)
+        rubric = load_rubric_by_name(rubrics_dir, name, local_only=True)
         if rubric is not None:
             rubrics[name] = _human_scales(rubric)
 
