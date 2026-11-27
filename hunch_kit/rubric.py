@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any
+import re
+from typing import Any, TextIO
 
 import yaml
 
+from ._local_files import directory_entries, local_directory, local_text_file
 
 RUBRIC_DIR_NAME = "rubrics"
 
@@ -26,7 +28,7 @@ class Dimension:
     scale_min: int = 1
     scale_max: int = 10
     evaluator: str = "human"  # "human" | "llm" | "both"
-    anchors: dict[int, str] = field(default_factory=dict)
+    anchors: dict[int | str, str] = field(default_factory=dict)
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -94,20 +96,24 @@ class Rubric:
 
     @classmethod
     def load(cls, path: Path) -> Rubric:
-        path = Path(path)
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return cls._from_dict(data)
+        with Path(path).open(encoding="utf-8") as stream:
+            return cls.from_stream(stream)
+
+    @classmethod
+    def from_stream(cls, stream: TextIO) -> Rubric:
+        return cls._from_dict(yaml.safe_load(stream) or {})
 
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> Rubric:
-        dims_raw = data.pop("dimensions", [])
-        dimensions = [
-            Dimension(**d) if isinstance(d, dict) else d for d in dims_raw
-        ]
+        if not isinstance(data, dict):
+            raise ValueError("Expected a rubric mapping")
+        dims_raw = data.get("dimensions", [])
+        if not isinstance(dims_raw, list):
+            raise ValueError("Expected a list of rubric dimensions")
         return cls(
             name=data.get("name", ""),
             description=data.get("description", ""),
-            dimensions=dimensions,
+            dimensions=[Dimension(**d) for d in dims_raw],
         )
 
     # -- Queries --------------------------------------------------------------
@@ -135,15 +141,82 @@ def find_rubrics(rubric_dir: Path) -> list[Path]:
     )
 
 
-def load_rubric_by_name(rubric_dir: Path, name: str) -> Rubric | None:
-    """Load a rubric by name from the rubrics directory."""
-    rubric_dir = Path(rubric_dir)
-    filename = name.lower().replace(" ", "_") + ".yaml"
-    path = rubric_dir / filename
-    if path.exists():
-        return Rubric.load(path)
-    for p in rubric_dir.glob("*.yaml"):
-        r = Rubric.load(p)
-        if r.name.lower() == name.lower():
-            return r
-    return None
+def _read_candidate(campaign: Path, path: Path, local_only: bool) -> Rubric | None:
+    try:
+        if not local_only:
+            path = path.resolve(strict=True)
+        with local_directory(campaign, path.parent) as fd:
+            if fd is None:
+                return None
+            with local_text_file(path, fd) as stream:
+                if stream is None:
+                    return None
+                rubric = Rubric.from_stream(stream)
+    except (OSError, RuntimeError, yaml.YAMLError, TypeError, ValueError):
+        return None
+    if not isinstance(rubric.name, str) or not rubric.name.strip() or not rubric.dimensions:
+        return None
+    if any(not isinstance(d.name, str) or not d.name.strip() for d in rubric.dimensions):
+        return None
+    return rubric
+
+
+def _candidate_paths(directory: Path, fd: int, local_only: bool) -> list[Path]:
+    paths = []
+    for entry in directory_entries(directory, fd):
+        path = directory / entry.name
+        if not path.match("*.yaml"):
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False) and (local_only or not entry.is_symlink()):
+                continue
+        except OSError:
+            # Retain the filename's precedence. Opening it will verify its type.
+            pass
+        paths.append(path)
+    return paths
+
+
+def load_rubric_by_name(rubric_dir: Path, name: str, *, local_only: bool = False) -> Rubric | None:
+    """Prefer a filename or stem over a unique declared name.
+
+    Evaluation accepts links to verified targets inside the campaign.
+    A local-only lookup excludes links throughout the rubric path.
+    """
+    if not isinstance(name, str) or not name.strip() or name in (".", ".."):
+        return None
+    if re.search(r'^[A-Za-z]:|[\\/\x00-\x1f]', name):
+        return None
+    directory = Path(rubric_dir).absolute()
+    campaign = directory.parent
+    try:
+        if not local_only:
+            campaign = campaign.resolve(strict=True)
+            directory = directory.resolve(strict=True)
+        with local_directory(campaign, directory) as fd:
+            if fd is None:
+                return None
+            candidates = _candidate_paths(directory, fd, local_only)
+    except (OSError, RuntimeError):
+        return None
+
+    key = name.lower()
+    filename = name if key.endswith(".yaml") else name + ".yaml"
+    alias = key.replace(" ", "_")
+    matches = (
+        [p for p in candidates if p.name == filename]
+        or [p for p in candidates if p.stem == name]
+        or [p for p in candidates if p.name.lower() == key or p.stem.lower() == key]
+        or [p for p in candidates if p.stem.lower() == alias]
+    )
+    if matches:
+        return _read_candidate(campaign, matches[0], local_only) if len(matches) == 1 else None
+
+    declared = None
+    for path in candidates:
+        rubric = _read_candidate(campaign, path, local_only)
+        if rubric is not None and rubric.name.lower() == key:
+            if declared is not None:
+                return None
+            declared = rubric
+    return declared

@@ -21,8 +21,50 @@ holds the exact fuji prompt used. Open the eval UI to see baseline-vs-current
 side by side with the prompt and the hand scores:
 
 ```bash
-hunch eval --project examples/design_thinking dt_v3
+hunch --root examples/design_thinking eval dt_v3
 ```
+
+## Export the scorecard
+
+Run this command from the repository root to save the Markdown scorecard.
+
+```bash
+hunch --root examples/design_thinking scorecard > scorecard.md
+```
+
+The redirected report uses UTF-8. Each experiment lists its parent, changed
+variable, and human scores. In `dt_v3`, the changed variable was
+`heading_typography`.
+
+| Dimension | Parent score (`dt_v2`) | Human score (`dt_v3`) | Change |
+| --- | --- | --- | --- |
+| `text_accuracy` | 6 | 10 | +4 |
+| `visual_fidelity` | 9 | 8 | -1 |
+
+`Root` marks an experiment without a parent. An absent, empty, or whitespace-only
+score appears as `Missing`. The change is the child's score minus its parent's score.
+Both rubrics must have the same overall instructions and define the human-scored
+dimension once, with matching descriptions, numeric limits, and anchor labels
+at the same positions. Limits accept quoted numbers. Anchor positions accept
+integers and their quoted equivalents. Ambiguous dimensions, invalid limits,
+or different scoring instructions give `Incomparable rubrics`.
+
+The exporter reads regular files in the campaign and skips symbolic links and
+Windows junctions. Select a rubric by its local filename (`Human Review.yaml`)
+or stem (`Human Review`). A stem reference like `Human Review` also matches
+`human_review.yaml` if the literal stem is absent. If no filename matches, a declared name
+such as `UX: Clarity` must identify one usable rubric. An ambiguous name, an
+unreadable or invalid file, or a path reference leaves the rubric unavailable. The report
+keeps the recorded scores and marks the comparison `Incomparable rubrics`.
+
+Without `--root`, the scorecard searches upward for a regular
+`hunch_project.yaml` and skips linked markers. The evaluation UI and MCP rubric
+lookup can use rubric links whose targets are inside the campaign.
+
+An empty or duplicate experiment ID stops the export before it prints a report.
+In variable values, `\n` represents a line break, `\t` a tab, `\u0020` a
+leading, trailing, or repeated space, and `\\` a literal backslash. Other
+controls also have visible escapes, such as `\u0000` for NUL.
 
 ## Why the title broke, and how one change fixed it
 

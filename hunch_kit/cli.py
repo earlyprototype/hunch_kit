@@ -7,6 +7,7 @@ Usage:
     hunch eval [id]      Launch the evaluation web UI
     hunch list           List all experiments
     hunch lineage [id]   Display experiment genealogy
+    hunch scorecard      Export human scores and changes from each parent
 """
 
 
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import sys
 
 import click
 
@@ -289,6 +291,22 @@ def list_experiments(ctx: click.Context) -> None:
             f"{m.id:<30} {m.status:<12} {m.baseline or '—':<20} "
             f"{m.overall_preference or '—'}"
         )
+
+
+@cli.command()
+@click.pass_context
+def scorecard(ctx: click.Context) -> None:
+    """Write a Markdown scorecard comparing each experiment to its parent."""
+    from .scorecard import render_scorecard
+
+    campaign = resolve_campaign_root(explicit=ctx.obj.get("explicit_root"), local_only=True)
+    manifests = load_all_manifests(campaign / "experiments", local_only=True)
+    try:
+        config = ProjectConfig.load_local(campaign)
+        report = render_scorecard(manifests, campaign / "rubrics", config.name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(report if sys.stdout.isatty() else report.encode("utf-8"))
 
 
 # -- lineage ------------------------------------------------------------------

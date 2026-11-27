@@ -1,5 +1,6 @@
 """Tests for rubric schema and YAML I/O."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -141,3 +142,76 @@ class TestDiscovery:
         rubric_dir = tmp_project / "rubrics"
         loaded = load_rubric_by_name(rubric_dir, "nonexistent")
         assert loaded is None
+
+    @pytest.mark.parametrize("name", ["../other", r"..\other", "/other", r"\\offline.invalid\rubric", "D:other"])
+    def test_path_reference_rejected_before_filesystem_access(self, name, monkeypatch):
+        def reject_io(*args, **kwargs):
+            pytest.fail("Rubric lookup touched the filesystem for a path reference")
+
+        with monkeypatch.context() as guard:
+            for method in ("stat", "lstat", "resolve", "iterdir", "glob", "open"):
+                guard.setattr(Path, method, reject_io)
+            assert load_rubric_by_name(Path("rubrics"), name) is None
+
+    def test_lookup_by_declared_name(self, tmp_project: Path):
+        rubric_dir = tmp_project / "rubrics"
+        path = Rubric(name="Human Review", dimensions=[Dimension("quality")]).save(rubric_dir)
+        path.rename(rubric_dir / "local.yaml")
+
+        assert load_rubric_by_name(rubric_dir, "human review").name == "Human Review"
+
+    def test_lookup_by_punctuated_display_name(self, tmp_project: Path):
+        directory = tmp_project / "rubrics"
+        (directory / "clarity.yaml").write_text(
+            "name: 'How clear?'\ndimensions:\n- name: clarity\n", encoding="utf-8",
+        )
+
+        rubric = load_rubric_by_name(directory, "how clear?")
+        assert rubric is not None
+        assert rubric.name == "How clear?"
+
+    def test_normalized_filename_precedes_declared_name(self, tmp_project: Path):
+        directory = tmp_project / "rubrics"
+        Rubric("Human Review", dimensions=[Dimension("other")]).save(directory).rename(directory / "a.yaml")
+        Rubric("Pinned", dimensions=[Dimension("quality")]).save(directory).rename(directory / "human_review.yaml")
+
+        assert load_rubric_by_name(directory, "Human Review").name == "Pinned"
+
+    def test_unusable_filename_does_not_fall_back_to_declared_name(self, tmp_project: Path):
+        directory = tmp_project / "rubrics"
+        Rubric("Draft", dimensions=[Dimension("quality")]).save(directory).rename(directory / "a.yaml")
+        (directory / "draft.yaml").write_text("name: Draft\ndimensions:\n", encoding="utf-8")
+
+        assert load_rubric_by_name(directory, "draft") is None
+
+    @pytest.mark.parametrize("in_campaign", [False, True])
+    def test_file_link_in_direct_and_declared_name_lookup(self, tmp_path: Path, in_campaign: bool):
+        campaign = tmp_path / "campaign"
+        rubric_dir = campaign / "rubrics"
+        rubric_dir.mkdir(parents=True)
+        rubric = Rubric(name="Other", dimensions=[Dimension("quality")])
+        target = rubric.save(campaign if in_campaign else tmp_path)
+        try:
+            (rubric_dir / "alias.yaml").symlink_to(target)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Creating file symlinks requires Windows symlink privileges")
+            raise
+
+        for reference in ("alias", "Other"):
+            assert load_rubric_by_name(rubric_dir, reference) == (rubric if in_campaign else None)
+            assert load_rubric_by_name(rubric_dir, reference, local_only=True) is None
+
+    def test_linked_rubrics_directory_is_unavailable(self, tmp_path: Path):
+        directory = tmp_path / "campaign" / "rubrics"
+        directory.parent.mkdir()
+        outside = tmp_path / "other"
+        Rubric(name="Review", dimensions=[Dimension("quality")]).save(outside)
+        if os.name == "nt":
+            # A directory junction works without the Windows symlink privilege.
+            from _winapi import CreateJunction
+            CreateJunction(str(outside), str(directory))
+        else:
+            directory.symlink_to(outside, target_is_directory=True)
+
+        assert load_rubric_by_name(directory, "Review") is None

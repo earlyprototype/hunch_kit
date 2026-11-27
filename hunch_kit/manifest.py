@@ -10,9 +10,11 @@ from dataclasses import dataclass, field, asdict
 from datetime import date
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import yaml
+
+from ._local_files import local_files
 
 logger = logging.getLogger(__name__)
 
@@ -108,10 +110,14 @@ class Manifest:
         path = Path(path)
         if path.is_dir():
             path = path / MANIFEST_FILENAME
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        manifest = cls._from_dict(data)
+        with path.open(encoding="utf-8") as stream:
+            manifest = cls.from_stream(stream)
         logger.debug("Loaded manifest %r from %s", manifest.id, path)
         return manifest
+
+    @classmethod
+    def from_stream(cls, stream: TextIO) -> Manifest:
+        return cls._from_dict(yaml.safe_load(stream) or {})
 
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> Manifest:
@@ -156,18 +162,24 @@ class Manifest:
 def find_experiments(root: Path) -> list[Path]:
     """Find all experiment directories under *root* that contain a manifest."""
     root = Path(root)
-    if not root.is_dir():
+    campaign = root.parent.resolve()
+    if not root.resolve().is_relative_to(campaign) or not root.is_dir():
         return []
     return sorted(
-        p.parent
-        for p in root.rglob(MANIFEST_FILENAME)
-        if p.is_file()
+        path.parent for path in root.rglob(MANIFEST_FILENAME)
+        if path.resolve().is_relative_to(campaign) and path.is_file()
     )
 
 
-def load_all_manifests(root: Path) -> list[Manifest]:
-    """Load every manifest found under *root*."""
-    return [Manifest.load(d) for d in find_experiments(root)]
+def load_all_manifests(root: Path, *, local_only: bool = False) -> list[Manifest]:
+    """Load campaign manifests. Read only verified, unlinked files for an export."""
+    if not local_only:
+        return [Manifest.load(directory) for directory in find_experiments(root)]
+    manifests = {
+        path.parent: Manifest.from_stream(stream)
+        for path, stream in local_files(root, MANIFEST_FILENAME, recursive=True)
+    }
+    return [manifests[directory] for directory in sorted(manifests)]
 
 
 def build_lineage(manifests: list[Manifest]) -> dict[str, list[str]]:
