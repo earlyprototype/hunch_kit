@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import sys
 
 import click
 
@@ -299,7 +300,11 @@ def scorecard(ctx: click.Context) -> None:
     from .scorecard import render_scorecard
 
     manifests = load_all_manifests(_experiments_dir(ctx))
-    click.echo(render_scorecard(manifests, _rubrics_dir(ctx), _project_config(ctx).name))
+    try:
+        report = render_scorecard(manifests, _rubrics_dir(ctx), _project_config(ctx).name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(report if sys.stdout.isatty() else report.encode("utf-8"))
 
 
 # -- lineage ------------------------------------------------------------------

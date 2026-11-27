@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+import re
+import stat
 from typing import Any
 
 import yaml
@@ -26,7 +28,7 @@ class Dimension:
     scale_min: int = 1
     scale_max: int = 10
     evaluator: str = "human"  # "human" | "llm" | "both"
-    anchors: dict[int, str] = field(default_factory=dict)
+    anchors: dict[int | str, str] = field(default_factory=dict)
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -135,15 +137,34 @@ def find_rubrics(rubric_dir: Path) -> list[Path]:
     )
 
 
+def _local_mode(path: Path) -> int:
+    """Inspect the directory entry without following links or Windows junctions."""
+    try:
+        entry = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return 0
+    if getattr(entry, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return 0
+    return entry.st_mode
+
+
 def load_rubric_by_name(rubric_dir: Path, name: str) -> Rubric | None:
-    """Load a rubric by name from the rubrics directory."""
+    """Match a rubric name against regular YAML files in the local directory."""
+    if not isinstance(name, str) or not name.strip() or name in (".", ".."):
+        return None
+    if re.search(r'[\\/:<>"|?*\x00-\x1f]', name):
+        return None
     rubric_dir = Path(rubric_dir)
-    filename = name.lower().replace(" ", "_") + ".yaml"
-    path = rubric_dir / filename
-    if path.exists():
-        return Rubric.load(path)
-    for p in rubric_dir.glob("*.yaml"):
-        r = Rubric.load(p)
-        if r.name.lower() == name.lower():
-            return r
+    if not stat.S_ISDIR(_local_mode(rubric_dir)):
+        return None
+
+    preferred = rubric_dir / (name.lower().replace(" ", "_") + ".yaml")
+    # Check the conventional filename first, then match declared names.
+    candidates = sorted(rubric_dir.glob("*.yaml"), key=lambda path: (path != preferred, path))
+    for path in candidates:
+        if not stat.S_ISREG(_local_mode(path)):
+            continue
+        rubric = Rubric.load(path)
+        if path == preferred or rubric.name.lower() == name.lower():
+            return rubric
     return None

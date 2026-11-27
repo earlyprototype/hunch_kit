@@ -32,8 +32,8 @@ Run this command from the repository root to save the Markdown scorecard.
 hunch --root examples/design_thinking scorecard > scorecard.md
 ```
 
-The command reads local manifests and rubrics and prints the report to standard
-output. Each experiment lists its parent and the variable changed. For
+The command reads local manifests and rubrics. Redirected output uses UTF-8.
+Each experiment lists its parent and the variable changed. For
 `dt_v3`, the change to `heading_typography` raised text accuracy and lowered
 visual fidelity.
 
@@ -44,8 +44,16 @@ visual fidelity.
 
 `Root` marks an experiment without a parent. `Missing` marks an absent score.
 The change is the child's score minus its parent's score. Both rubrics must
-define a human-scored dimension with the same name, scale limits, and anchors.
-The report marks other dimensions as `Incomparable rubrics`.
+define a human-scored dimension with the same name, description, scale limits,
+and anchor labels at the same positions. Integer positions and their numeric
+strings match. A difference in the scoring instructions, including on an
+unanchored scale, gives `Incomparable rubrics`.
+
+Rubric names select regular YAML files in the campaign's `rubrics/` directory.
+Path references, symbolic links, and Windows junctions are unavailable.
+An empty or duplicate experiment ID stops the export before it prints a report.
+In variable values, `\n` represents a line break, `\t` a tab, `\u0020` a
+leading, trailing, or repeated space, and `\\` a literal backslash.
 
 ## Why the title broke, and how one change fixed it
 

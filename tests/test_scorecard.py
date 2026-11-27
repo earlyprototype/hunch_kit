@@ -1,7 +1,11 @@
 """Offline scorecard checks through the public CLI."""
 
+import os
 from pathlib import Path
+import subprocess
+import sys
 
+import pytest
 from click.testing import CliRunner
 
 from hunch_kit.cli import cli
@@ -78,17 +82,21 @@ def test_rubric_compatibility_is_checked_per_dimension(tmp_project: Path) -> Non
     Rubric(name="First", dimensions=[
         Dimension("clarity"), Dimension("tone", scale_max=5), Dimension("spacing"),
         Dimension("contrast", anchors={1: "clear", 10: "unclear"}),
+        Dimension("quality", description="Higher scores mean fewer errors"),
+        Dimension("coverage", anchors={1: "none", 10: "all"}),
     ]).save(rubric_dir)
     Rubric(name="Second", dimensions=[
         Dimension("clarity"), Dimension("tone"), Dimension("detail"),
         Dimension("contrast", anchors={1: "unclear", 10: "clear"}),
+        Dimension("quality", description="Higher scores mean more errors"),
+        Dimension("coverage", anchors={"1": "none", "10": "all"}),
     ]).save(rubric_dir)
     exp_dir = tmp_project / "experiments"
     Manifest(id="a", rubric="First", human_scores={
-        "clarity": 6.5, "tone": 4, "spacing": 3, "contrast": 3,
+        "clarity": 6.5, "tone": 4, "spacing": 3, "contrast": 3, "quality": 6, "coverage": 6,
     }).save(exp_dir / "a")
     Manifest(id="b", baseline="a", rubric="Second", human_scores={
-        "clarity": 7, "tone": 8, "detail": 6, "contrast": 7,
+        "clarity": 7, "tone": 8, "detail": 6, "contrast": 7, "quality": 8, "coverage": 8,
     }).save(exp_dir / "b")
 
     child = section(export(tmp_project), "b")
@@ -97,6 +105,8 @@ def test_rubric_compatibility_is_checked_per_dimension(tmp_project: Path) -> Non
     assert "| `spacing` | 3 | Missing | Incomparable rubrics |" in child
     assert "| `detail` | Missing | 6 | Incomparable rubrics |" in child
     assert "| `contrast` | 3 | 7 | Incomparable rubrics |" in child
+    assert "| `quality` | 6 | 8 | Incomparable rubrics |" in child
+    assert "| `coverage` | 6 | 8 | +2 |" in child
 
 
 def test_missing_rubric_and_parent_preserve_recorded_scores(tmp_project: Path) -> None:
@@ -112,6 +122,38 @@ def test_missing_rubric_and_parent_preserve_recorded_scores(tmp_project: Path) -
     assert "| `detail` | 4 | 6 | Incomparable rubrics |" in section(report, "b")
 
 
+def test_external_rubric_reported_as_unavailable(tmp_project: Path) -> None:
+    Rubric(name="Other", dimensions=[Dimension("detail")]).save(tmp_project)
+    Manifest(id="sample", rubric="../other").save(tmp_project / "experiments" / "sample")
+
+    assert "Rubric: `../other` (unavailable)" in export(tmp_project)
+
+
+def test_non_string_rubric_reference_is_unavailable(tmp_project: Path) -> None:
+    exp_dir = tmp_project / "experiments"
+    path = Manifest(id="a", human_scores={"detail": 4}).save(exp_dir / "a")
+    with path.open("a", encoding="utf-8") as file:
+        file.write("rubric: [Review]\n")
+    Rubric(name="Review", dimensions=[Dimension("detail")]).save(tmp_project / "rubrics")
+    Manifest(id="b", baseline="a", rubric="Review", human_scores={"detail": 6}).save(exp_dir / "b")
+
+    report = export(tmp_project)
+    assert "(unavailable)" in section(report, "a")
+    assert "| `detail` | 4 | 6 | Incomparable rubrics |" in section(report, "b")
+
+
+def test_null_anchors_leave_the_description_as_the_scale_definition(tmp_project: Path) -> None:
+    (tmp_project / "rubrics" / "review.yaml").write_text(
+        "name: Review\ndimensions:\n- name: detail\n  description: More is better\n  anchors: null\n",
+        encoding="utf-8",
+    )
+    exp_dir = tmp_project / "experiments"
+    Manifest(id="a", rubric="Review", human_scores={"detail": 6}).save(exp_dir / "a")
+    Manifest(id="b", baseline="a", rubric="Review", human_scores={"detail": 8}).save(exp_dir / "b")
+
+    assert "| `detail` | 6 | 8 | +2 |" in section(export(tmp_project), "b")
+
+
 def test_empty_scores_and_literal_markdown_in_manifests(tmp_project: Path) -> None:
     exp_dir = tmp_project / "experiments"
     Rubric(name="Review", dimensions=[Dimension("look|feel")]).save(tmp_project / "rubrics")
@@ -124,5 +166,52 @@ def test_empty_scores_and_literal_markdown_in_manifests(tmp_project: Path) -> No
     ).save(exp_dir / "b")
 
     child = section(export(tmp_project), "b")
-    assert "Changed variable: `label` = `` use `small` print ``" in child
+    assert r"Changed variable: `label` = `` use `small`\nprint ``" in child
     assert r"| `look\|feel` | Missing | 2 | Missing score |" in child
+
+
+def test_significant_whitespace_remains_distinct(tmp_project: Path) -> None:
+    values = {
+        "indent": ("  ", r"\u0020\u0020"),
+        "line": ("first\nsecond", r"first\nsecond"),
+        "space": ("first second", "first second"),
+        "literal": (r"first\nsecond", r"first\\nsecond"),
+    }
+    for experiment, (value, _) in values.items():
+        Manifest(id=experiment, variable_changed="text", variable_value=value).save(
+            tmp_project / "experiments" / experiment
+        )
+
+    report = export(tmp_project)
+    for experiment, (_, expected) in values.items():
+        assert f"Changed variable: `text` = `{expected}`" in section(report, experiment)
+
+
+@pytest.mark.parametrize("contents", ["", "id: '  '", "id: same\nbaseline: second"])
+def test_ambiguous_identity_fails_before_markdown(tmp_project: Path, contents: str) -> None:
+    exp_dir = tmp_project / "experiments"
+    Manifest(id="same", baseline="first").save(exp_dir / "a")
+    path = Manifest().save(exp_dir / "b")
+    path.write_text(contents, encoding="utf-8")
+
+    result = CliRunner().invoke(cli, ["--root", str(tmp_project), "scorecard"])
+    assert result.exit_code != 0
+    assert "# Campaign scorecard" not in result.output
+    if "same" in contents:
+        assert "duplicate" in result.output.lower() and "same" in result.output
+    else:
+        assert "empty" in result.output.lower() and "id" in result.output.lower()
+
+
+def test_redirected_report_uses_utf8(tmp_project: Path) -> None:
+    Manifest(id="sample", variable_changed="label", variable_value="見出し").save(
+        tmp_project / "experiments" / "sample"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", "from hunch_kit.cli import cli; cli()",
+         "--root", str(tmp_project), "scorecard"],
+        env={**os.environ, "PYTHONUTF8": "0", "PYTHONIOENCODING": "cp1252:strict"},
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Changed variable: `label` = `見出し`".encode("utf-8") in result.stdout

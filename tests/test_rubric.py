@@ -1,5 +1,6 @@
 """Tests for rubric schema and YAML I/O."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -141,3 +142,47 @@ class TestDiscovery:
         rubric_dir = tmp_project / "rubrics"
         loaded = load_rubric_by_name(rubric_dir, "nonexistent")
         assert loaded is None
+
+    @pytest.mark.parametrize("name", ["../other", r"..\other", "/other", r"\\offline.invalid\rubric", "D:other"])
+    def test_path_reference_rejected_before_filesystem_access(self, name, monkeypatch):
+        def reject_io(*args, **kwargs):
+            pytest.fail("Rubric lookup touched the filesystem for a path reference")
+
+        with monkeypatch.context() as guard:
+            for method in ("stat", "lstat", "resolve", "iterdir", "glob", "open"):
+                guard.setattr(Path, method, reject_io)
+            assert load_rubric_by_name(Path("rubrics"), name) is None
+
+    def test_lookup_by_declared_name(self, tmp_project: Path):
+        rubric_dir = tmp_project / "rubrics"
+        path = Rubric(name="Human Review", dimensions=[Dimension("quality")]).save(rubric_dir)
+        path.rename(rubric_dir / "local.yaml")
+
+        assert load_rubric_by_name(rubric_dir, "human review").name == "Human Review"
+
+    def test_external_symlink_ignored_in_direct_and_declared_name_lookup(self, tmp_project: Path):
+        rubric_dir = tmp_project / "rubrics"
+        outside = Rubric(name="Other", dimensions=[Dimension("quality")]).save(tmp_project)
+        try:
+            (rubric_dir / "alias.yaml").symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Creating file symlinks requires Windows symlink privileges")
+            raise
+
+        assert load_rubric_by_name(rubric_dir, "alias") is None
+        assert load_rubric_by_name(rubric_dir, "Other") is None
+
+    def test_linked_rubrics_directory_is_unavailable(self, tmp_path: Path):
+        directory = tmp_path / "campaign" / "rubrics"
+        directory.parent.mkdir()
+        outside = tmp_path / "other"
+        Rubric(name="Review", dimensions=[Dimension("quality")]).save(outside)
+        if os.name == "nt":
+            # A directory junction works without the Windows symlink privilege.
+            from _winapi import CreateJunction
+            CreateJunction(str(outside), str(directory))
+        else:
+            directory.symlink_to(outside, target_is_directory=True)
+
+        assert load_rubric_by_name(directory, "Review") is None
