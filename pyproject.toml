@@ -39,6 +39,7 @@ llm = [
     "google-genai>=1.0",
 ]
 dev = [
+    "httpx>=0.23",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
@@ -53,6 +54,9 @@ Issues = "https://github.com/earlyprototype/hunch_kit/issues"
 
 [tool.setuptools.packages.find]
 include = ["hunch_kit*", "hunch_kit_mcp*"]
+
+[tool.setuptools.package-data]
+"hunch_kit.evaluation" = ["templates/*.html", "static/*.css", "static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

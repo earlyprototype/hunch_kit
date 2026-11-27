@@ -21,7 +21,7 @@ holds the exact fuji prompt used. Open the eval UI to see baseline-vs-current
 side by side with the prompt and the hand scores:
 
 ```bash
-hunch eval --project examples/design_thinking dt_v3
+hunch --root examples/design_thinking eval dt_v3
 ```
 
 ## Why the title broke, and how one change fixed it
@@ -33,6 +33,27 @@ headline — the single riskiest place for letterform corruption. Constraining
 headings to plain sans-serif with an explicit spelling rule (`dt_v3`) removed
 the corruption source. That is the whole point of the tool: a human caught the
 flaw, changed **one** thing, and verified the improvement.
+
+## Blind review
+
+From the repository root, start the reviewer on a disposable copy of the campaign.
+The UI reads the two checked-in PNGs for `dt_v3` and its baseline, `dt_v2`.
+
+```bash
+demo=$(mktemp -d)
+cp -R examples/design_thinking "$demo/campaign"
+hunch --root "$demo/campaign" eval --blind dt_v3
+```
+
+Open `http://127.0.0.1:8888/`. Each new review assigns the images to A and B
+at random. Refreshing the comparison URL keeps that assignment while the
+server is running. Select **A**, **B** or **Tie** to record the choice and reveal
+both experiment IDs. Choosing the child records `better`, choosing the baseline
+records `worse`, and a tie records `equivalent` in the child's
+`experiment.yaml`. The baseline manifest stays byte-identical.
+
+The ordinary experiment list also offers **Blind comparison** for children.
+For the root's rubric and scores, open `/eval/dt_v1`.
 
 ## Reproducing (NotebookLM)
 

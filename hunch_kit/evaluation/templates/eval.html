@@ -7,6 +7,7 @@
   <span><strong>Hypothesis:</strong> {{ manifest.hypothesis }}</span>
   <span><strong>Variable:</strong> {{ manifest.variable_changed }} = {{ manifest.variable_value }}</span>
   <span><strong>Status:</strong> {{ manifest.status }}</span>
+  {% if manifest.baseline %}<a href="/blind?experiment_id={{ experiment_id | urlencode }}">Blind comparison</a>{% endif %}
 </div>
 
 <div class="comparison">

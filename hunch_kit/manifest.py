@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from datetime import date
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,26 @@ SCHEMA_VERSION = "1"
 MANIFEST_FILENAME = "experiment.yaml"
 
 REQUIRED_FIELDS = ("id", "hypothesis", "variable_changed", "variable_value")
+
+
+def _manifest_yaml(data: dict[str, Any]) -> str:
+    return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+def save_overall_preference(directory: Path, preference: str) -> None:
+    """Update just the preference in the existing YAML, including older or extended manifests."""
+    path = directory / MANIFEST_FILENAME
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["overall_preference"] = preference
+    temp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False)
+    temp_path = Path(temp.name)
+    try:
+        with temp:
+            temp.write(_manifest_yaml(data))
+        shutil.copymode(path, temp_path)
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 @dataclass
@@ -88,15 +110,7 @@ class Manifest:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / MANIFEST_FILENAME
-        path.write_text(
-            yaml.dump(
-                self.to_dict(),
-                default_flow_style=False,
-                sort_keys=False,
-                allow_unicode=True,
-            ),
-            encoding="utf-8",
-        )
+        path.write_text(_manifest_yaml(self.to_dict()), encoding="utf-8")
         logger.debug("Saved manifest %r to %s", self.id, path)
         return path
 

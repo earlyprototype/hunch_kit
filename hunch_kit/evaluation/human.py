@@ -7,17 +7,21 @@ rubric dimensions.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import secrets
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from ..manifest import Manifest, load_all_manifests
+from ..manifest import MANIFEST_FILENAME, Manifest, load_all_manifests, save_overall_preference
 from ..rubric import Rubric, load_rubric_by_name
 
 
@@ -32,6 +36,24 @@ STATUS_CLASSES = {
 }
 
 
+@dataclass
+class BlindComparison:
+    child: str
+    baseline: str
+    child_slot: str
+    output_hashes: tuple[bytes, ...] = ()
+    vote: str = ""
+
+    def preference(self, vote: str) -> str:
+        if vote == "tie":
+            return "equivalent"
+        return "better" if vote == self.child_slot else "worse"
+
+
+class ComparisonUnavailable(HTTPException):
+    """An error the reviewer can see before the mapping is revealed."""
+
+
 def _create_jinja_env() -> Environment:
     """Build the Jinja2 environment with auto-escaping."""
     return Environment(
@@ -44,6 +66,8 @@ def create_app(
     experiments_dir: Path,
     rubrics_dir: Path,
     filter_id: str | None = None,
+    *,
+    blind: bool = False,
 ) -> FastAPI:
     """Build the FastAPI application for human evaluation."""
 
@@ -51,6 +75,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     jinja_env = _create_jinja_env()
+    comparisons: dict[str, BlindComparison] = {}
 
     # Stash config on the app for route access
     app.state.experiments_dir = Path(experiments_dir)
@@ -59,6 +84,8 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
+        if blind:
+            return start_comparison(filter_id)
         experiments_path = app.state.experiments_dir
         manifests = load_all_manifests(experiments_path)
 
@@ -130,6 +157,79 @@ def create_app(
         )
         return HTMLResponse(html)
 
+    @app.exception_handler(ComparisonUnavailable)
+    async def comparison_error(request: Request, exc: ComparisonUnavailable) -> HTMLResponse:
+        template = jinja_env.get_template("error.html")
+        return HTMLResponse(template.render(
+            title="Comparison unavailable", code=exc.status_code, message=exc.detail,
+        ), status_code=exc.status_code)
+
+    def comparison_manifest(experiment_id: str | None) -> Manifest:
+        root = app.state.experiments_dir.resolve()
+        if experiment_id and Path(experiment_id).name == experiment_id:
+            path = root / experiment_id / MANIFEST_FILENAME
+            if path.resolve().is_relative_to(root) and path.is_file():
+                manifest = Manifest.load(path)
+                if manifest.id == experiment_id:
+                    return manifest
+        raise ComparisonUnavailable(404, "This comparison requires a child experiment with a baseline.")
+
+    @app.get("/blind")
+    def start_comparison(experiment_id: str | None = None) -> RedirectResponse:
+        child = comparison_manifest(experiment_id)
+        baseline = comparison_manifest(child.baseline)
+        if child.id == baseline.id:
+            raise ComparisonUnavailable(409, "This comparison requires two distinct experiments.")
+        key = secrets.token_urlsafe(18)
+        comparisons[key] = BlindComparison(child.id, baseline.id, secrets.choice(("A", "B")))
+        return RedirectResponse(f"/blind/{key}", status_code=303)
+
+    def get_comparison(key: str) -> BlindComparison:
+        if key not in comparisons:
+            raise ComparisonUnavailable(404, "This comparison has expired. Start a new review.")
+        return comparisons[key]
+
+    def comparison_outputs(comparison: BlindComparison) -> dict[str, str]:
+        child = comparison_manifest(comparison.child)
+        if child.baseline != comparison.baseline:
+            raise ComparisonUnavailable(409, "The baseline changed. Start a new review.")
+        baseline = comparison_manifest(comparison.baseline)
+        ordered = (child, baseline) if comparison.child_slot == "A" else (baseline, child)
+        outputs = {}
+        for slot, manifest in zip(("A", "B"), ordered):
+            output = _read_output(app.state.experiments_dir / manifest.id, manifest, blind=True)
+            if not output:
+                raise ComparisonUnavailable(409, "Both experiments need a readable text or image output.")
+            outputs[slot] = output
+        hashes = tuple(hashlib.sha256(output.encode()).digest() for output in outputs.values())
+        if comparison.output_hashes and comparison.output_hashes != hashes:
+            raise ComparisonUnavailable(409, "An output changed. Start a new review.")
+        comparison.output_hashes = hashes
+        return outputs
+
+    @app.get("/blind/{key}", response_class=HTMLResponse)
+    async def blind_page(key: str) -> HTMLResponse:
+        comparison = get_comparison(key)
+        outputs = comparison_outputs(comparison)
+        template = jinja_env.get_template("blind.html")
+        return HTMLResponse(template.render(
+            title="Blind comparison", outputs=outputs, key=key,
+            result=comparison if comparison.vote else None,
+        ), headers={"Cache-Control": "no-store"})
+
+    @app.post("/blind/{key}/vote/{vote}")
+    async def blind_vote(key: str, vote: Literal["A", "B", "tie"]) -> RedirectResponse:
+        comparison = get_comparison(key)
+        if not comparison.vote:
+            if not comparison.output_hashes:
+                raise ComparisonUnavailable(409, "View both outputs before choosing.")
+            comparison_outputs(comparison)
+            save_overall_preference(
+                app.state.experiments_dir / comparison.child, comparison.preference(vote)
+            )
+            comparison.vote = vote
+        return RedirectResponse(f"/blind/{key}", status_code=303)
+
     @app.post("/eval/{experiment_id}/score")
     async def submit_score(experiment_id: str, request: Request) -> JSONResponse:
         exp_dir = app.state.experiments_dir / experiment_id
@@ -179,11 +279,13 @@ def _read_input(exp_dir: Path, manifest: Manifest) -> str:
         return ""
 
 
-def _read_output(exp_dir: Path, manifest: Manifest) -> str:
+def _read_output(exp_dir: Path, manifest: Manifest, *, blind: bool = False) -> str:
     if not manifest.output_path:
         return ""
     output_path = exp_dir / manifest.output_path
-    if not output_path.exists():
+    if blind and not output_path.resolve().is_relative_to(exp_dir.resolve()):
+        return ""
+    if not output_path.is_file():
         return ""
     suffix = output_path.suffix.lower()
     if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"):
@@ -191,14 +293,22 @@ def _read_output(exp_dir: Path, manifest: Manifest) -> str:
         import mimetypes
 
         mime = mimetypes.guess_type(str(output_path))[0] or "image/png"
-        encoded = base64.b64encode(output_path.read_bytes()).decode("ascii")
+        try:
+            image = output_path.read_bytes()
+        except OSError:
+            if blind:
+                return ""
+            raise
+        if blind and not image:
+            return ""
+        encoded = base64.b64encode(image).decode("ascii")
         return f"data:{mime};base64,{encoded}"
     if suffix in (".txt", ".md", ".yaml", ".yml", ".json"):
         try:
             return output_path.read_text(encoding="utf-8")[:50_000]
         except Exception:
-            return f"[Could not read: {output_path.name}]"
-    return f"[Binary file: {output_path.name} — open externally]"
+            return "" if blind else f"[Could not read: {output_path.name}]"
+    return "" if blind else f"[Binary file: {output_path.name} — open externally]"
 
 
 def _format_meta(manifest: Manifest) -> str:

@@ -94,6 +94,8 @@ A provider is anything that takes an input and produces an output. Text generato
 
 A local web UI presents outputs side-by-side for scoring against rubric dimensions. Configurable scales with calibration anchors ("1 = Unusable, 5 = Acceptable, 10 = Exceptional"). Scores write directly back to the experiment manifest.
 
+For a blind review, run `hunch eval --blind CHILD_ID` and open the local URL. Choose A, B or Tie to reveal which output came from the baseline. The child records the result in `overall_preference`. [Try the design thinking example](examples/design_thinking/README.md#blind-review).
+
 ### Experiment lineage
 
 Every experiment knows its parent. Over time this builds a genealogy — a traceable path from initial hunch to validated output. No more "wait, which version was the good one?"
