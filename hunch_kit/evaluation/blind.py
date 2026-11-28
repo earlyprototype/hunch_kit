@@ -4,18 +4,26 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import stat
+import struct
 from collections import OrderedDict
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageCms, ImageOps
+
+from ..project import ImageMask
 
 
 Kind = Literal["image", "text"]
-Fingerprint = tuple[Kind, bytes]
+Fingerprint = tuple[Kind, bytes, tuple[str, ...]]
+
+
+class UnverifiedAttribution(ValueError):
+    """A preview cannot safely hide its source. Messages may appear on the ballot."""
 
 
 @dataclass(frozen=True)
@@ -24,7 +32,7 @@ class Preview:
     content: str
 
 
-def _png_preview(raw: bytes, mask: list[int] | None) -> str:
+def _decode_pixels(raw: bytes) -> Image.Image:
     formats = ("PNG", "JPEG", "GIF", "WEBP")
     try:
         with Image.open(BytesIO(raw), formats=formats) as image:
@@ -43,18 +51,47 @@ def _png_preview(raw: bytes, mask: list[int] | None) -> str:
                     pixels.putalpha(Image.frombytes("L", gray.size, alpha))
             else:
                 pixels = oriented.convert("RGBA")
-            if mask is not None:
-                left, top, right, bottom = mask
-                if not (0 <= left < right <= pixels.width and 0 <= top < bottom <= pixels.height):
-                    raise ValueError("The blind image mask is outside the preview.")
-                pixels.paste((240, 240, 240, 255), (left, top, right, bottom))
+            if profile := image.info.get("icc_profile"):
+                if oriented.mode == "CMYK":
+                    color = oriented
+                elif oriented.mode in ("1", "L", "LA", "I") or oriented.mode.startswith("I;16"):
+                    color = pixels.getchannel("R")
+                else:
+                    color = pixels.convert("RGB")
+                srgb = ImageCms.profileToProfile(
+                    color, BytesIO(profile), ImageCms.createProfile("sRGB"), outputMode="RGB",
+                )
+                srgb.putalpha(pixels.getchannel("A"))
+                pixels = srgb
+            return pixels
     except Exception as exc:
         # Pillow plugins use different exceptions for invalid headers and pixel data.
         raise ValueError("The image could not be decoded as a still preview.") from exc
+
+
+def _pixel_digest(pixels: Image.Image) -> str:
+    digest = hashlib.sha256(struct.pack(">II", *pixels.size))
+    digest.update(pixels.tobytes())
+    return digest.hexdigest()
+
+
+def _png_preview(pixels: Image.Image, mask: list[int] | None) -> str:
+    if mask is not None:
+        left, top, right, bottom = mask
+        if not (0 <= left < right <= pixels.width and 0 <= top < bottom <= pixels.height):
+            raise UnverifiedAttribution("The blind image mask is outside the preview.")
+        pixels.paste((240, 240, 240, 255), (left, top, right, bottom))
     pixels.info.clear()
     encoded = BytesIO()
     pixels.save(encoded, format="PNG", compress_level=1)
     return "data:image/png;base64," + base64.b64encode(encoded.getbuffer()).decode("ascii")
+
+
+def _text_preview(raw: bytes, provider: str, prefix: str) -> str:
+    text = raw.decode("utf-8").removeprefix(prefix)
+    if provider and re.search(rf"(?<!\w){re.escape(provider)}(?!\w)", text, re.IGNORECASE):
+        raise UnverifiedAttribution("The text still identifies its provider.")
+    return text
 
 
 def _reject_remote(name: str) -> None:
@@ -65,6 +102,8 @@ def _reject_remote(name: str) -> None:
 
 def local_file(directory: Path, name: str) -> Path:
     """Walk from the trusted local directory, checking links before traversing them."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("A local filename is required.")
     _reject_remote(name)
     _reject_remote(str(directory))
     root = directory.absolute()
@@ -105,11 +144,35 @@ def local_file(directory: Path, name: str) -> Path:
 class BlindPreviews:
     """Share recent previews across refreshes and votes without retaining every ballot."""
 
-    def __init__(self, image_masks: dict[str, list[int]] | None = None) -> None:
-        self.image_masks = image_masks or {}
+    def __init__(self, image_masks: dict[str, ImageMask | list[int]] | None = None) -> None:
+        self.required_pixels: dict[str, str] = {}
+        self.pixel_masks: dict[str, list[int]] = {}
+        self.legacy_masks: dict[str, list[int]] = {}
+        for name, mask in (image_masks or {}).items():
+            if isinstance(mask, list):
+                self.legacy_masks[name] = mask
+            else:
+                digest = mask["pixel_sha256"]
+                self.required_pixels[name] = digest
+                self.pixel_masks[digest] = mask["rectangle"]
         self.recent: OrderedDict[Fingerprint, Preview] = OrderedDict()
 
-    def read(self, directory: Path, output_path: str) -> Fingerprint:
+    def _image_preview(self, raw: bytes, raw_hash: bytes, required: str | None) -> str:
+        pixels = _decode_pixels(raw)
+        mask = self.legacy_masks.get(raw_hash.hex())
+        if self.pixel_masks:
+            digest = _pixel_digest(pixels)
+            if required is not None and digest != required:
+                raise UnverifiedAttribution("An image has changed since its mask was verified.")
+            mask = self.pixel_masks.get(digest, mask)
+        if (required is not None or self.legacy_masks) and mask is None:
+            # Encoded-file rules do not identify which experiment a miss belongs to.
+            raise UnverifiedAttribution("A verified image mask is required.")
+        return _png_preview(pixels, mask)
+
+    def read(
+        self, directory: Path, output_path: str, *, attribution: tuple[str, str] = ("", ""),
+    ) -> Fingerprint:
         path = local_file(directory, output_path)
         suffix = Path(output_path).suffix.lower()
         kind: Kind
@@ -123,14 +186,19 @@ class BlindPreviews:
         raw = path.read_bytes()
         if not raw:
             raise ValueError("Empty artifact.")
-        key = (kind, hashlib.sha256(raw).digest())
+        required = self.required_pixels.get(directory.name)
+        if required is not None and kind != "image":
+            raise UnverifiedAttribution("The designated output requires a verified image mask.")
+        raw_hash = hashlib.sha256(raw).digest()
+        # A cached preview must satisfy the same mask or attribution requirements.
+        key = (kind, raw_hash, (required or "",) if kind == "image" else attribution)
         if key in self.recent:
             self.recent.move_to_end(key)
         else:
             if kind == "image":
-                content = _png_preview(raw, self.image_masks.get(key[1].hex()))
+                content = self._image_preview(raw, raw_hash, required)
             else:
-                content = raw.decode("utf-8")
+                content = _text_preview(raw, *attribution)
             self.recent[key] = Preview(kind, content)
             if len(self.recent) > 4:  # Two full A/B pairs. Completed votes retain their mapping.
                 self.recent.popitem(last=False)

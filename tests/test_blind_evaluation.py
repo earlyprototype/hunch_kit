@@ -2,11 +2,14 @@
 
 import asyncio
 import base64
+import hashlib
+import os
 import re
 import secrets
 import shutil
 import stat
 import struct
+import subprocess
 import threading
 from html.parser import HTMLParser
 from io import BytesIO
@@ -17,7 +20,7 @@ import httpx
 import pytest
 import yaml
 from click.testing import CliRunner
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 from hunch_kit import manifest as manifest_io
 from hunch_kit import runner
@@ -143,6 +146,135 @@ def text_pair(tmp_project):
         manifest_io.Manifest(id=name, baseline=baseline, output_path="result.txt").save(directory)
         (directory / "result.txt").write_text(name.upper(), encoding="utf-8")
     return tmp_project
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", [None, "From stub_local: "])
+async def test_bundled_provider_attribution_is_hidden(tmp_project, prefix):
+    shutil.copytree(EXAMPLE.parent / "campaign/providers", tmp_project / "providers")
+    for name, provider, baseline in [("first", "echo", ""), ("second", "stub_local", "first")]:
+        directory = tmp_project / "experiments" / name
+        config = {"prefix": prefix} if provider == "stub_local" and prefix else {}
+        manifest_io.Manifest(id=name, baseline=baseline, provider=provider,
+                             provider_config=config, input_path="input.txt").save(directory)
+        (directory / "input.txt").write_text("Describe a sunset.", encoding="utf-8")
+        assert runner.run_experiment(directory).status == "success"
+
+    child_output = tmp_project / "experiments/second/output/result.txt"
+    original = child_output.read_bytes()
+    assert b"stub_local" in original
+    async with client_for(tmp_project, filter_id="second", blind=True) as client:
+        page = await client.get("/")
+        assert page.status_code == 200
+        assert "stub_local" not in page.text
+        assert page.text.count("<pre>Describe a sunset.</pre>") == 2
+        assert (await client.post(ReviewForm(page.text).votes["Tie"])).status_code == 200
+    assert child_output.read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_unrecognized_stub_attribution_withholds_ballot(text_pair):
+    directory = text_pair / "experiments/second"
+    manifest = manifest_io.Manifest.load(directory)
+    manifest.provider = "stub_local"
+    manifest.save(directory)
+    (directory / "result.txt").write_text("Earlier stub_local export: The proposal.", encoding="utf-8")
+    async with client_for(text_pair, filter_id="second", blind=True) as client:
+        page = await client.get("/")
+        assert page.status_code == 409
+        assert "stub_local" not in page.text and not ReviewForm(page.text).votes
+
+
+@pytest.mark.asyncio
+async def test_reexport_retains_mask_and_changed_pixels_require_review(campaign, monkeypatch):
+    monkeypatch.setattr(secrets, "choice", lambda slots: "A")
+    path = campaign / "experiments/dt_v3/output/result.png"
+    with Image.open(path) as original:
+        pixels = original.copy()
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("Export", "Another lossless encoding")
+    pixels.save(path, pnginfo=metadata, compress_level=1)
+    assert path.read_bytes() != (EXAMPLE / "experiments/dt_v3/output/result.png").read_bytes()
+    async with client_for(campaign, filter_id="dt_v3", blind=True) as client:
+        page = await client.get("/")
+        assert page.status_code == 200
+        form = ReviewForm(page.text)
+        encoded = form.images["Output A"].split(",", 1)[1]
+        with Image.open(BytesIO(base64.b64decode(encoded))) as preview:
+            assert preview.crop((1328, 2720, 1536, 2752)).getcolors(1) == [(208 * 32, (240, 240, 240, 255))]
+        orientation = Image.Exif()
+        orientation[274] = 3
+        pixels.save(path, exif=orientation, compress_level=1)
+        rotated = await client.get("/")
+        assert rotated.status_code == 409 and not ReviewForm(rotated.text).votes
+        pixels.putpixel((0, 0), (255, 0, 255, 255))
+        pixels.save(path, compress_level=1)
+        fresh = await client.get("/")
+        assert fresh.status_code == 409
+        assert not ReviewForm(fresh.text).votes
+        assert (await client.post(form.votes["A"])).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_older_ballot_keeps_its_original_preference(text_pair):
+    async with client_for(text_pair, filter_id="second", blind=True) as client:
+        older = await client.get("/")
+        newer = await client.get("/")
+        assert (await client.post(ReviewForm(newer.text).votes["Tie"])).status_code == 200
+        await client.get(older.url)
+        rejected = await client.post(ReviewForm(older.text).votes["A"])
+        assert rejected.status_code == 409
+        assert "second" not in rejected.text
+        assert manifest_io.Manifest.load(text_pair / "experiments/second").overall_preference == "equivalent"
+
+
+@pytest.mark.asyncio
+async def test_revisionless_root_scoring_merges_supplied_fields(text_pair):
+    path = text_pair / "experiments/first/experiment.yaml"
+    data = yaml.safe_load(path.read_bytes())
+    data.update(human_scores={"clarity": 6}, notes="Keep this note", campaign_annotation="Keep this field")
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    async with client_for(text_pair) as client:
+        saved = await client.post("/eval/first/score", json={"scores": {"quality": "8"}})
+        assert saved.status_code == 200
+        assert saved.json()["revision"] == manifest_io.Manifest.load(path).revision_token
+    assert yaml.safe_load(path.read_bytes()) == {**data, "human_scores": {"clarity": 6, "quality": 8.0}}
+
+
+@pytest.mark.asyncio
+async def test_vote_accepts_read_only_baseline(text_pair):
+    baseline = text_pair / "experiments/first"
+    before = {p.name: p.read_bytes() for p in baseline.iterdir()}
+    if os.name == "nt":
+        # A Windows directory's read-only attribute does not restrict file creation.
+        subprocess.run(["icacls", str(baseline), "/deny", "*S-1-1-0:(OI)(CI)(WD,AD)"],
+                       check=True, capture_output=True)
+    else:
+        baseline.chmod(0o555)
+        for path in baseline.iterdir():
+            path.chmod(0o444)
+    try:
+        async with client_for(text_pair, filter_id="second", blind=True) as client:
+            ballot = await client.get("/")
+            saved = await client.post(ReviewForm(ballot.text).votes["Tie"])
+            assert saved.status_code == 200
+        assert {p.name: p.read_bytes() for p in baseline.iterdir()} == before
+    finally:
+        if os.name == "nt":
+            subprocess.run(["icacls", str(baseline), "/remove:d", "*S-1-1-0"], check=True, capture_output=True)
+        else:
+            baseline.chmod(0o755)
+            for path in baseline.iterdir():
+                path.chmod(0o644)
+
+
+def test_manifest_and_run_locks_leave_campaign_files_untouched(text_pair):
+    directory = text_pair / "experiments/second"
+    legacy_paths = [directory / ".experiment.yaml.lock", directory / ".experiment.run.lock"]
+    for path in legacy_paths:
+        path.write_bytes(b"campaign data")
+    runner.run_experiment(directory, provider_override="echo")
+    assert all(path.is_file() and path.read_bytes() == b"campaign data" for path in legacy_paths)
 
 
 @pytest.mark.asyncio
@@ -302,7 +434,7 @@ async def test_text_review_updates_only_the_preference(tmp_project):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("problem", ["root", "missing baseline", "self baseline", "missing output", "binary"])
+@pytest.mark.parametrize("problem", ["root", "missing baseline", "self baseline", "missing output", "null", "binary"])
 async def test_unavailable_comparison_preserves_manifests(campaign, problem):
     experiments = campaign / "experiments"
     selected = "dt_v1" if problem == "root" else "dt_v3"
@@ -312,6 +444,8 @@ async def test_unavailable_comparison_preserves_manifests(campaign, problem):
         data["baseline"] = "missing"
     if problem == "self baseline":
         data["baseline"] = selected
+    if problem == "null":
+        data["output_path"] = None
     if problem in {"missing output", "binary"}:
         data["output_path"] = "identifying-filename.bin"
         if problem == "binary":
@@ -321,6 +455,8 @@ async def test_unavailable_comparison_preserves_manifests(campaign, problem):
     async with client_for(campaign, filter_id=selected, blind=True) as client:
         page = await client.get("/")
         assert page.is_client_error
+        if problem == "null":
+            assert page.status_code == 409
         assert "identifying-filename" not in page.text
         assert selected not in page.text
         assert "formaction" not in page.text
@@ -426,6 +562,30 @@ def test_grayscale_ramp_retains_tones(tmp_path):
     encoded = previews.recent[fingerprint].content.split(",", 1)[1]
     with Image.open(BytesIO(base64.b64decode(encoded))) as preview:
         assert list(preview.convert("L").getdata()) == [0, 4, 128, 233, 255]
+
+
+def test_cmyk_preview_applies_embedded_profile():
+    # The synthetic ICC profile maps this CMYK swatch to neutral gray (Lab L*=50).
+    swatch = Path(__file__).parent / "fixtures/cmyk-neutral.jpg"
+    previews = BlindPreviews()
+    key = previews.read(swatch.parent, swatch.name)
+    encoded = previews.recent[key].content.split(",", 1)[1]
+    with Image.open(BytesIO(base64.b64decode(encoded))) as preview:
+        assert preview.info == {}
+        assert preview.getpixel((0, 0)) == (119, 119, 119, 255)
+
+
+def test_legacy_encoded_image_masks_require_a_match(tmp_path):
+    path = tmp_path / "output.png"
+    Image.new("RGB", (2, 1), "blue").save(path)
+    previews = BlindPreviews({hashlib.sha256(path.read_bytes()).hexdigest(): [0, 0, 1, 1]})
+    key = previews.read(tmp_path, path.name)
+    encoded = previews.recent[key].content.split(",", 1)[1]
+    with Image.open(BytesIO(base64.b64decode(encoded))) as preview:
+        assert list(preview.getdata()) == [(240, 240, 240, 255), (0, 0, 255, 255)]
+    Image.new("RGB", (2, 1), "red").save(path)
+    with pytest.raises(ValueError):
+        previews.read(tmp_path, path.name)
 
 
 @pytest.mark.parametrize("remote", [r"\\server\share\plot.png", "//server/share/plot.png",

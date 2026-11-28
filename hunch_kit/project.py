@@ -11,11 +11,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import yaml
 
 PROJECT_FILENAME = "hunch_project.yaml"
+
+
+class ImageMask(TypedDict):
+    pixel_sha256: str
+    rectangle: list[int]
 
 
 @dataclass
@@ -27,7 +32,7 @@ class ProjectConfig:
     default_provider: str = "echo"
     default_rubric: str = ""
     providers_path: str = "providers"
-    blind_image_masks: dict[str, list[int]] = field(default_factory=dict)
+    blind_image_masks: dict[str, ImageMask | list[int]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v or v == 0}

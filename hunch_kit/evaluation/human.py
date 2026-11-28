@@ -22,11 +22,11 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from ..manifest import (
     MANIFEST_FILENAME, Manifest, ManifestConflict, load_all_manifests, reserve_outputs,
-    save_overall_preference,
+    save_human_scores, save_overall_preference,
 )
 from ..project import ProjectConfig
 from ..rubric import Rubric, load_rubric_by_name
-from .blind import BlindPreviews, Fingerprint, local_file
+from .blind import BlindPreviews, Fingerprint, UnverifiedAttribution, local_file
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -46,6 +46,7 @@ class BlindComparison:
     baseline: str
     child_slot: str
     output_hashes: tuple[Fingerprint, ...] = ()
+    initial_preference: str = ""
     vote: str = ""
 
     def preference(self, vote: str) -> str:
@@ -209,14 +210,23 @@ def create_app(
         ordered = (child, baseline) if comparison.child_slot == "A" else (baseline, child)
         try:
             hashes = tuple(
-                previews.read(app.state.experiments_dir / manifest.id, manifest.output_path)
+                previews.read(
+                    app.state.experiments_dir / manifest.id, manifest.output_path,
+                    attribution=_text_attribution(manifest),
+                )
                 for manifest in ordered
             )
+        except UnverifiedAttribution as exc:
+            raise ComparisonUnavailable(409, str(exc)) from exc
         except (OSError, ValueError) as exc:
             raise ComparisonUnavailable(409, "Both experiments need readable text or a still image.") from exc
-        if comparison.output_hashes and comparison.output_hashes != hashes:
+        if not comparison.output_hashes:
+            comparison.output_hashes = hashes
+            comparison.initial_preference = child.overall_preference
+        elif comparison.output_hashes != hashes:
             raise ComparisonUnavailable(409, "An output changed. Start a new review.")
-        comparison.output_hashes = hashes
+        elif comparison.initial_preference != child.overall_preference:
+            raise ComparisonUnavailable(409, "The recorded preference changed. Start a new review.")
         return child
 
     @app.get("/blind/{key}", response_class=HTMLResponse)
@@ -260,34 +270,29 @@ def create_app(
             return JSONResponse({"error": "Experiment not found"}, status_code=404)
 
         data = await request.json()
-        manifest = Manifest.load(exp_dir)
-        if data.get("revision") != manifest.revision_token or manifest.status == "running":
-            return JSONResponse({"error": "Reload the scoring form after the latest change."}, status_code=409)
-
-        scores = data.get("scores", {})
-        for key, value in scores.items():
-            try:
-                manifest.human_scores[key] = float(value)
-            except (ValueError, TypeError):
-                manifest.human_scores[key] = value
-
-        if data.get("overall_preference"):
-            manifest.overall_preference = data["overall_preference"]
-        if "notes" in data:
-            manifest.notes = data["notes"]
-
         try:
-            manifest.save(exp_dir)
+            revision = save_human_scores(exp_dir, data)
         except ManifestConflict as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         return JSONResponse({
-            "status": "saved", "experiment_id": experiment_id, "revision": manifest.revision_token,
+            "status": "saved", "experiment_id": experiment_id, "revision": revision,
         })
 
     return app
 
 
 # -- Helpers ------------------------------------------------------------------
+
+
+def _text_attribution(manifest: Manifest) -> tuple[str, str]:
+    """Use the recorded producer when the runner used a provider override."""
+    provider = (manifest.provider_metadata or {}).get("provider") or manifest.provider
+    if not isinstance(provider, str) or not provider:
+        return "", ""
+    prefix = (manifest.provider_config or {}).get("prefix")
+    if isinstance(prefix, str) and provider.casefold() in prefix.casefold():
+        return provider, prefix
+    return provider, f"[{provider}] "
 
 
 def _load_rubric_for(manifest: Manifest, rubrics_dir: Path) -> Rubric | None:

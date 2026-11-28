@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import date
 import hashlib
 import logging
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "1"
 MANIFEST_FILENAME = "experiment.yaml"
+LOCK_DIRECTORY = Path.home() / ".hunch-kit-locks"
 
 REQUIRED_FIELDS = ("id", "hypothesis", "variable_changed", "variable_value")
 
@@ -36,13 +38,21 @@ class ManifestConflict(RuntimeError):
     """The manifest changed since this writer read it."""
 
 
+def _lock_path(directory: Path, purpose: str) -> Path:
+    """Share locks between local processes without opening a campaign-supplied file."""
+    LOCK_DIRECTORY.mkdir(mode=0o700, exist_ok=True)
+    canonical = os.path.normcase(str(directory.resolve()))
+    key = hashlib.sha256(os.fsencode(canonical)).hexdigest()
+    return LOCK_DIRECTORY / f"{key}.{purpose}.lock"
+
+
 @contextmanager
 def reserve_outputs(*directories: Path):
     """Exclude runs while a ballot commits, and overlapping runs on the same output."""
     with ExitStack() as locks:
-        for directory in sorted(set(directories)):
+        for path in sorted({_lock_path(directory, "run") for directory in directories}):
             try:
-                locks.enter_context(FileLock(directory / ".experiment.run.lock", timeout=0))
+                locks.enter_context(FileLock(path, timeout=0))
             except Timeout as exc:
                 raise ManifestConflict("An output is in use. Retry when the operation finishes.") from exc
         yield
@@ -86,7 +96,7 @@ def _write_manifest(
         temp_path = Path(staging) / "manifest.tmp"
         temp_path.write_bytes(revision)
         # A separate lock stays valid when the YAML file is atomically replaced.
-        with FileLock(path.with_name(".experiment.yaml.lock")):
+        with FileLock(_lock_path(path.parent, "manifest")):
             if _current_revision(path) != expected:
                 raise ManifestConflict("The manifest changed. Reload it and retry.")
             if expected is not None:
@@ -107,6 +117,38 @@ def save_overall_preference(directory: Path, preference: str, *, revision: bytes
     data = yaml.safe_load(revision)
     data["overall_preference"] = preference
     _write_manifest(path, data, revision)
+
+
+def save_human_scores(directory: Path, update: dict[str, Any]) -> str:
+    """Merge supplied scoring fields and return the saved revision token."""
+    path = directory / MANIFEST_FILENAME
+    scores = {}
+    for name, value in update.get("scores", {}).items():
+        try:
+            scores[name] = float(value)
+        except (TypeError, ValueError):
+            scores[name] = value
+
+    while True:
+        revision = path.read_bytes()
+        data = yaml.safe_load(revision)
+        if data.get("status") == "running" or (
+            "revision" in update and update["revision"] != hashlib.sha256(revision).hexdigest()
+        ):
+            raise ManifestConflict("Reload the scoring form after the latest change.")
+        if scores:
+            data.setdefault("human_scores", {}).update(scores)
+        if update.get("overall_preference"):
+            data["overall_preference"] = update["overall_preference"]
+        if "notes" in update:
+            data["notes"] = update["notes"]
+        try:
+            saved = _write_manifest(path, data, revision)
+        except ManifestConflict:
+            if "revision" in update:
+                raise
+            continue
+        return hashlib.sha256(saved).hexdigest()
 
 
 def mark_run_failed(directory: Path) -> None:
