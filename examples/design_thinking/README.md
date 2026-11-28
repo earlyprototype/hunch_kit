@@ -38,8 +38,11 @@ flaw, changed **one** thing, and verified the improvement.
 
 From the repository root, start the reviewer on a disposable copy of the campaign.
 The UI reads the two checked-in PNGs for `dt_v3` and its baseline, `dt_v2`.
-It decodes the pixels locally and serves PNG previews without embedded provider
-metadata. The source images stay intact.
+It decodes the pixels locally, removes embedded metadata and covers the printed
+provider mark in the lower right corner of each preview. The campaign's
+`blind_image_masks` maps each source PNG's SHA-256 to a rectangle in pixels
+(`left, top, right, bottom`). All pixels outside that rectangle match the
+source. The ordinary scoring page displays the original images.
 
 ```bash
 demo=$(mktemp -d)
@@ -58,6 +61,10 @@ Blind review accepts still PNG, JPEG, GIF and WebP images and displays the full
 text of UTF-8 TXT, Markdown, YAML and JSON files. If either output changes
 before submission, start a new review. After a vote, the comparison URL shows
 the recorded choice and mapping for the rest of the server session.
+
+Voting pauses while either experiment is running. If a blind vote changes the
+child while its ordinary scoring form is open, saving that form returns a
+conflict. Reload it to see the recorded preference before saving further edits.
 
 The ordinary experiment list also offers **Blind comparison** for children.
 For the root's rubric and scores, open `/eval/dt_v1`.

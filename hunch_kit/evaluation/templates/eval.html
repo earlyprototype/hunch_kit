@@ -50,7 +50,7 @@
 <div class="scoring-section{% if current_input %} has-prompt{% endif %}">
   <div class="scoring-main">
   <h2>Scoring</h2>
-  <form id="scoring-form" data-experiment-id="{{ experiment_id }}">
+  <form id="scoring-form" data-experiment-id="{{ experiment_id }}" data-revision="{{ manifest.revision_token }}">
 
     {# Rubric dimensions #}
     {% if dimensions %}

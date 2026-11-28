@@ -2,3 +2,8 @@ name: design_thinking
 description: A real incremental lineage — fuji-styled NotebookLM infographics of design thinking, scored by hand
 default_provider: notebooklm
 default_rubric: design_infographic
+blind_image_masks:
+  # Source PNG SHA-256 mapped to the provider attribution rectangle.
+  e90ccf547d3c571cc39f0886e275908c1880c55c04edf379efbb361e6ac3ad29: [1328, 2720, 1536, 2752]
+  4a19e1fc8ec8c40ab705fb645b20692ec1cf6cb208270b5ec52ea2d1272555bd: [1328, 2720, 1536, 2752]
+  5f15c21ae86afc3fd346fffe3e76cae3a315e8833e9f5c1cfeb591dd6ab377c4: [1328, 2720, 1536, 2752]

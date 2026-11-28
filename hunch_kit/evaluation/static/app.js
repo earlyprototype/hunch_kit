@@ -24,6 +24,7 @@ document.addEventListener("DOMContentLoaded", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          revision: form.dataset.revision,
           scores,
           overall_preference: preference,
           notes,
@@ -31,6 +32,7 @@ document.addEventListener("DOMContentLoaded", () => {
       });
 
       if (res.ok) {
+        form.dataset.revision = (await res.json()).revision;
         status.textContent = "Saved";
         status.style.color = "#16a34a";
       } else {

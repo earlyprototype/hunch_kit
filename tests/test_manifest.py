@@ -1,5 +1,7 @@
 """Tests for manifest schema and YAML I/O."""
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -50,6 +52,21 @@ class TestManifestValidation:
 
 
 class TestManifestRoundTrip:
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX file creation modes")
+    @pytest.mark.parametrize("umask", [0o022, 0o077])
+    def test_new_file_respects_umask_and_update_preserves_mode(self, tmp_path, umask):
+        previous = os.umask(umask)
+        try:
+            manifest = Manifest.create("ex", "h", "v", "val")
+            path = manifest.save(tmp_path)
+            assert stat.S_IMODE(path.stat().st_mode) == 0o666 & ~umask
+            path.chmod(0o640)
+            manifest.notes = "updated"
+            manifest.save(tmp_path)
+            assert stat.S_IMODE(path.stat().st_mode) == 0o640
+        finally:
+            os.umask(previous)
+
     def test_save_and_load(self, tmp_project: Path):
         exp_dir = tmp_project / "experiments" / "ex_001"
         original = Manifest.create(

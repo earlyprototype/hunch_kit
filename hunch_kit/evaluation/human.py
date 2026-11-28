@@ -21,10 +21,12 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from ..manifest import (
-    MANIFEST_FILENAME, Manifest, ManifestConflict, load_all_manifests, save_overall_preference,
+    MANIFEST_FILENAME, Manifest, ManifestConflict, load_all_manifests, reserve_outputs,
+    save_overall_preference,
 )
+from ..project import ProjectConfig
 from ..rubric import Rubric, load_rubric_by_name
-from .blind import BlindPreviews, Fingerprint
+from .blind import BlindPreviews, Fingerprint, local_file
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -78,7 +80,7 @@ def create_app(
 
     jinja_env = _create_jinja_env()
     comparisons: dict[str, BlindComparison] = {}
-    previews = BlindPreviews()
+    previews = BlindPreviews(ProjectConfig.load(Path(experiments_dir).parent).blind_image_masks)
 
     # Stash config on the app for route access
     app.state.experiments_dir = Path(experiments_dir)
@@ -167,15 +169,20 @@ def create_app(
             title="Comparison unavailable", code=exc.status_code, message=exc.detail,
         ), status_code=exc.status_code)
 
-    def comparison_manifest(experiment_id: str | None) -> Manifest:
-        root = app.state.experiments_dir.resolve()
-        if experiment_id and Path(experiment_id).name == experiment_id:
-            path = root / experiment_id / MANIFEST_FILENAME
-            if path.resolve().is_relative_to(root) and path.is_file():
-                manifest = Manifest.load(path)
-                if manifest.id == experiment_id:
-                    return manifest
+    def comparison_directory(experiment_id: str | None) -> Path:
+        if experiment_id and Path(experiment_id).name == experiment_id and experiment_id != "..":
+            try:
+                local_file(app.state.experiments_dir, f"{experiment_id}/{MANIFEST_FILENAME}")
+                return app.state.experiments_dir / experiment_id
+            except (OSError, ValueError):
+                pass
         raise ComparisonUnavailable(404, "This comparison requires a child experiment with a baseline.")
+
+    def comparison_manifest(experiment_id: str | None) -> Manifest:
+        manifest = Manifest.load(comparison_directory(experiment_id))
+        if manifest.id != experiment_id:
+            raise ComparisonUnavailable(409, "The experiment changed. Start a new review.")
+        return manifest
 
     @app.get("/blind")
     def start_comparison(experiment_id: str | None = None) -> RedirectResponse:
@@ -197,6 +204,8 @@ def create_app(
         if child.baseline != comparison.baseline:
             raise ComparisonUnavailable(409, "The baseline changed. Start a new review.")
         baseline = comparison_manifest(comparison.baseline)
+        if "running" in (child.status, baseline.status):
+            raise ComparisonUnavailable(409, "An experiment is running. Review the outputs when it finishes.")
         ordered = (child, baseline) if comparison.child_slot == "A" else (baseline, child)
         try:
             hashes = tuple(
@@ -231,12 +240,14 @@ def create_app(
         if not comparison.vote:
             if not comparison.output_hashes:
                 raise ComparisonUnavailable(409, "View both outputs before choosing.")
-            child = check_outputs(comparison)
+            directories = (comparison_directory(comparison.child), comparison_directory(comparison.baseline))
             try:
-                save_overall_preference(
-                    app.state.experiments_dir / child.id, comparison.preference(vote),
-                    revision=child.revision,
-                )
+                with reserve_outputs(*directories):
+                    child = check_outputs(comparison)
+                    save_overall_preference(
+                        app.state.experiments_dir / child.id, comparison.preference(vote),
+                        revision=child.revision,
+                    )
             except ManifestConflict as exc:
                 raise ComparisonUnavailable(409, str(exc)) from exc
             comparison.vote = vote
@@ -250,6 +261,8 @@ def create_app(
 
         data = await request.json()
         manifest = Manifest.load(exp_dir)
+        if data.get("revision") != manifest.revision_token or manifest.status == "running":
+            return JSONResponse({"error": "Reload the scoring form after the latest change."}, status_code=409)
 
         scores = data.get("scores", {})
         for key, value in scores.items():
@@ -267,7 +280,9 @@ def create_app(
             manifest.save(exp_dir)
         except ManifestConflict as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
-        return JSONResponse({"status": "saved", "experiment_id": experiment_id})
+        return JSONResponse({
+            "status": "saved", "experiment_id": experiment_id, "revision": manifest.revision_token,
+        })
 
     return app
 

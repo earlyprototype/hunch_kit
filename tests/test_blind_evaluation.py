@@ -1,12 +1,17 @@
 """Offline reviews of the checked-in design thinking outputs."""
 
+import asyncio
 import base64
 import re
 import secrets
 import shutil
+import stat
+import struct
+import threading
 from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -15,8 +20,11 @@ from click.testing import CliRunner
 from PIL import Image
 
 from hunch_kit import manifest as manifest_io
+from hunch_kit import runner
 from hunch_kit.cli import cli
+from hunch_kit.evaluation.blind import BlindPreviews
 from hunch_kit.evaluation.human import create_app
+from hunch_kit.providers.base import BaseProvider, ProviderResult
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "design_thinking"
@@ -90,7 +98,14 @@ async def test_review_images(campaign, monkeypatch, child_slot, vote, preference
             with Image.open(BytesIO(preview)) as actual, Image.open(original) as expected:
                 assert actual.info == {}
                 assert actual.size == expected.size
-                assert actual.convert("RGBA").tobytes() == expected.convert("RGBA").tobytes()
+                # The provider signature occupies the last 208 x 32 pixels.
+                corner = (1328, 2720, 1536, 2752)
+                colors = actual.crop(corner).convert("RGBA").getcolors(1)
+                assert colors and colors[0][1][3] == 255
+                assert expected.crop(corner).convert("RGB").getcolors(1) is None
+                for box in [(0, 0, 1536, 2720), (0, 2720, 1328, 2752)]:
+                    source_pixels = expected.crop(box).convert("RGBA").tobytes()
+                    assert actual.crop(box).convert("RGBA").tobytes() == source_pixels
                 assert not actual.private_chunks
             assert source.read_bytes() == original.read_bytes()
 
@@ -338,3 +353,117 @@ def test_blind_cli_requires_a_child():
     result = CliRunner().invoke(cli, ["eval", "--blind"])
     assert result.exit_code == 2
     assert "experiment ID" in result.output
+
+
+@pytest.mark.asyncio
+async def test_score_from_older_tab_preserves_blind_tie(campaign):
+    async with client_for(campaign) as client:
+        scoring = await client.get("/eval/dt_v3")
+        assert '<option value="better" selected>' in scoring.text
+        revision = re.search(r'data-revision="([^"]+)"', scoring.text)[1]
+        ballot = await client.get("/blind?experiment_id=dt_v3")
+        assert (await client.post(ReviewForm(ballot.text).votes["Tie"])).status_code == 200
+        payload = {"revision": revision, "overall_preference": "better", "notes": "From the old scoring tab"}
+        url = "/eval/dt_v3/score"
+        assert (await client.post(url, json=payload)).status_code == 409
+        child = campaign / "experiments/dt_v3"
+        assert manifest_io.Manifest.load(child).overall_preference == "equivalent"
+
+        fresh = await client.get("/eval/dt_v3")
+        payload.update(revision=re.search(r'data-revision="([^"]+)"', fresh.text)[1],
+                       overall_preference="equivalent")
+        saved = await client.post(url, json=payload)
+        assert saved.status_code == 200
+        payload.update(revision=saved.json()["revision"], notes="A second edit")
+        assert (await client.post(url, json=payload)).status_code == 200
+        assert manifest_io.Manifest.load(child).notes == "A second edit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["sync", "async"])
+@pytest.mark.parametrize("experiment", ["first", "second"])
+async def test_ballot_during_rerun(text_pair, monkeypatch, entry, experiment):
+    started, finish = threading.Event(), threading.Event()
+
+    class PausedProvider(BaseProvider):
+        def run(self, input_text, config=None):
+            started.set()
+            assert finish.wait(10)
+            return ProviderResult(output="New output")
+
+    directory = text_pair / "experiments" / experiment
+    monkeypatch.setattr(runner, "resolve_provider", lambda *a, **kw: PausedProvider())
+
+    def rerun():
+        if entry == "sync":
+            return runner.run_experiment(directory, provider_override="paused")
+        return asyncio.run(runner.run_experiment_async(directory, provider_override="paused"))
+
+    async with client_for(text_pair, filter_id="second", blind=True) as client:
+        ballot = await client.get("/")
+        action = ReviewForm(ballot.text).votes["Tie"]
+        task = asyncio.create_task(asyncio.to_thread(rerun))
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            assert (await client.post(action)).status_code == 409
+            assert (await client.get(ballot.url)).status_code == 409
+        finally:
+            finish.set()
+            await task
+        assert (await client.post(action)).status_code == 409
+        saved = manifest_io.Manifest.load(directory)
+        assert saved.status == "success"
+        assert (directory / saved.output_path).read_text() == "New output"
+        assert not manifest_io.Manifest.load(text_pair / "experiments/second").overall_preference
+
+
+def test_grayscale_ramp_retains_tones(tmp_path):
+    samples = (0, 1024, 32768, 60000, 65535)
+    path = tmp_path / "ramp.png"
+    Image.frombytes("I;16", (5, 1), struct.pack("<5H", *samples)).save(path)
+    previews = BlindPreviews()
+    fingerprint = previews.read(tmp_path, path.name)
+    encoded = previews.recent[fingerprint].content.split(",", 1)[1]
+    with Image.open(BytesIO(base64.b64decode(encoded))) as preview:
+        assert list(preview.convert("L").getdata()) == [0, 4, 128, 233, 255]
+
+
+@pytest.mark.parametrize("remote", [r"\\server\share\plot.png", "//server/share/plot.png",
+                                    r"\\?\UNC\server\share\plot.png", "smb://server/share/plot.png"])
+def test_remote_preview_is_rejected_before_filesystem_access(tmp_path, monkeypatch, remote):
+    def unexpected_io(*args, **kwargs):
+        pytest.fail("Remote output reached the filesystem")
+
+    with monkeypatch.context() as patch:
+        for method in ("resolve", "lstat", "stat", "read_bytes"):
+            patch.setattr(Path, method, unexpected_io)
+        with pytest.raises(ValueError):
+            BlindPreviews().read(tmp_path, remote)
+
+
+@pytest.mark.parametrize("link_mode", [stat.S_IFLNK, stat.S_IFDIR])
+def test_preview_checks_redirect_before_following_it(tmp_path, monkeypatch, link_mode):
+    redirect = tmp_path / "redirect"
+
+    def inspect(path):
+        assert path == redirect
+        return SimpleNamespace(st_mode=link_mode, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "lstat", inspect)
+        patch.setattr(Path, "readlink", lambda path: Path(r"\\server\share"))
+        for method in ("stat", "resolve", "read_bytes"):
+            patch.setattr(Path, method, lambda *a, **kw: pytest.fail("Followed a remote redirect"))
+        with pytest.raises(ValueError):
+            BlindPreviews().read(tmp_path, "redirect/result.png")
+
+
+def test_local_redirect_uses_the_declared_output_type(tmp_path, monkeypatch):
+    alias = tmp_path / "result.txt"
+    (tmp_path / "artifact").write_text("Local result", encoding="utf-8")
+    lstat = Path.lstat
+    monkeypatch.setattr(Path, "lstat", lambda p: SimpleNamespace(st_mode=stat.S_IFLNK) if p == alias else lstat(p))
+    monkeypatch.setattr(Path, "readlink", lambda p: Path("artifact"))
+    previews = BlindPreviews()
+    key = previews.read(tmp_path, alias.name)
+    assert previews.recent[key].content == "Local result"

@@ -27,6 +27,7 @@ class ProjectConfig:
     default_provider: str = "echo"
     default_rubric: str = ""
     providers_path: str = "providers"
+    blind_image_masks: dict[str, list[int]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v or v == 0}

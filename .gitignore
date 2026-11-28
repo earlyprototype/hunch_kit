@@ -17,6 +17,7 @@ htmlcov/
 
 experiments/*/output/
 .experiment.yaml.lock
+.experiment.run.lock
 *.pdf
 
 .env
