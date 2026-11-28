@@ -1,17 +1,66 @@
 """Tests for manifest schema and YAML I/O."""
 
+import hashlib
 import os
+import re
+import shutil
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from hunch_kit.manifest import (
     Manifest,
+    _publish_output,
     find_experiments,
     load_all_manifests,
     build_lineage,
+    save_overall_preference,
 )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows discretionary ACLs")
+def test_replacement_preserves_protected_windows_acl(tmp_path):
+    manifest = Manifest(id="child", output_path="result.txt")
+    path = manifest.save(tmp_path, output_text="original")
+    output = tmp_path / manifest.output_path
+    sid = re.search(rb"S-1-[\d-]+", subprocess.check_output(["whoami", "/user", "/fo", "csv"]))[0].decode()
+
+    def acl(file):
+        saved = tmp_path / "rules.txt"
+        subprocess.run(["icacls", str(file), "/save", str(saved)], check=True, capture_output=True)
+        return hashlib.sha256(saved.read_bytes()).digest()
+
+    for file in (path, output):
+        subprocess.run(["icacls", str(file), "/inheritance:r", "/grant:r", f"*{sid}:F"],
+                       check=True, capture_output=True)
+    manifest_acl, output_acl = acl(path), acl(output)
+    save_overall_preference(tmp_path, "equivalent")
+    assert acl(path) == manifest_acl
+    Manifest.load(path).save(tmp_path, output_text="published")
+    assert acl(output) == output_acl
+    with pytest.raises(OSError, match="commit failed"):
+        with _publish_output(output, "temporary"):
+            assert acl(output) == output_acl
+            raise OSError("commit failed")
+    assert output.read_text(encoding="utf-8") == "published"
+    assert acl(output) == output_acl
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("setfacl"),
+                    reason="Linux POSIX ACL tools")
+@pytest.mark.parametrize("file_acl", [False, True])
+def test_replacement_preserves_posix_access_acl(tmp_path, file_acl):
+    path = Manifest(id="child").save(tmp_path)
+    # Future files inherit a grant that the reviewed file does not have.
+    subprocess.run(["setfacl", "-m", "d:u:65534:rw", tmp_path], check=True)
+    if file_acl:
+        subprocess.run(["setfacl", "-m", "u:65534:r", path], check=True)
+    before = subprocess.check_output(["getfacl", "-cp", path])
+    save_overall_preference(tmp_path, "better")
+    assert subprocess.check_output(["getfacl", "-cp", path]) == before
 
 
 class TestManifestCreate:

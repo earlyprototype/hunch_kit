@@ -16,9 +16,12 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
 from filelock import FileLock, Timeout
+
+from ._file_permissions import prepare_replacement
 
 logger = logging.getLogger(__name__)
 
@@ -38,19 +41,19 @@ class ManifestConflict(RuntimeError):
     """The manifest changed since this writer read it."""
 
 
-def _lock_path(directory: Path, purpose: str) -> Path:
-    """Share locks between local processes without opening a campaign-supplied file."""
+def _local_state_path(directory: Path, suffix: str) -> Path:
+    """Share locks and ballot revisions between local processes."""
     LOCK_DIRECTORY.mkdir(mode=0o700, exist_ok=True)
     canonical = os.path.normcase(str(directory.resolve()))
     key = hashlib.sha256(os.fsencode(canonical)).hexdigest()
-    return LOCK_DIRECTORY / f"{key}.{purpose}.lock"
+    return LOCK_DIRECTORY / f"{key}.{suffix}"
 
 
 @contextmanager
 def reserve_outputs(*directories: Path):
     """Exclude runs while a ballot commits, and overlapping runs on the same output."""
     with ExitStack() as locks:
-        for path in sorted({_lock_path(directory, "run") for directory in directories}):
+        for path in sorted({_local_state_path(directory, "run.lock") for directory in directories}):
             try:
                 locks.enter_context(FileLock(path, timeout=0))
             except Timeout as exc:
@@ -65,6 +68,11 @@ def _current_revision(path: Path) -> bytes | None:
         return None
 
 
+def preference_revision(directory: Path) -> bytes:
+    """Local ballot generation shared by evaluators of this campaign."""
+    return _current_revision(_local_state_path(directory, "preference.rev")) or b""
+
+
 @contextmanager
 def _publish_output(path: Path, text: str):
     """Install a complete result and restore its predecessor if the manifest commit fails."""
@@ -72,10 +80,11 @@ def _publish_output(path: Path, text: str):
     with tempfile.TemporaryDirectory(dir=path.parent) as staging:
         new = Path(staging) / "new"
         old = Path(staging) / "old"
-        new.write_text(text, encoding="utf-8")
         if path.exists():
+            prepare_replacement(path, new)
+            prepare_replacement(path, old)
             shutil.copy2(path, old)
-            shutil.copymode(path, new)
+        new.write_text(text, encoding="utf-8")
         new.replace(path)
         try:
             yield
@@ -89,34 +98,57 @@ def _publish_output(path: Path, text: str):
 
 def _write_manifest(
     path: Path, data: dict[str, Any], expected: bytes | None, *, output_text: str | None = None,
+    baseline_snapshot: tuple[Path, bytes | None] | None = None,
+    reviewed_preference: bytes | None = None, judgment: bool = False,
 ) -> bytes:
     revision = _manifest_yaml(data).encode("utf-8")
     with tempfile.TemporaryDirectory(dir=path.parent) as staging:
         # Normal file creation applies the caller's umask. The staging directory is private.
         temp_path = Path(staging) / "manifest.tmp"
-        temp_path.write_bytes(revision)
         # A separate lock stays valid when the YAML file is atomically replaced.
-        with FileLock(_lock_path(path.parent, "manifest")):
-            if _current_revision(path) != expected:
+        snapshots = {path: expected}
+        if baseline_snapshot is not None:
+            baseline_path, baseline_bytes = baseline_snapshot
+            snapshots[baseline_path] = baseline_bytes
+        with ExitStack() as locks:
+            for lock in sorted({_local_state_path(p.parent, "manifest.lock") for p in snapshots}):
+                locks.enter_context(FileLock(lock))
+            if any(_current_revision(p) != snapshot for p, snapshot in snapshots.items()):
                 raise ManifestConflict("The manifest changed. Reload it and retry.")
+            if reviewed_preference is not None and preference_revision(path.parent) != reviewed_preference:
+                raise ManifestConflict("The recorded preference changed. Start a new review.")
             if expected is not None:
-                shutil.copymode(path, temp_path)
+                prepare_replacement(path, temp_path)
+            temp_path.write_bytes(revision)
             output = nullcontext() if output_text is None else _publish_output(
                 path.parent / data["output_path"], output_text,
             )
             with output:
+                previous = (yaml.safe_load(expected) or {}) if expected else {}
+                if judgment or data.get("overall_preference", "") != previous.get("overall_preference", ""):
+                    # Invalidate open ballots before publishing, even for a repeat judgment.
+                    # A failed publication can expire a ballot, but cannot revive a stale one.
+                    marker = _local_state_path(path.parent, "preference.rev")
+                    with tempfile.TemporaryDirectory(dir=marker.parent) as state_staging:
+                        update = Path(state_staging) / "revision"
+                        update.write_bytes(uuid4().bytes)
+                        update.replace(marker)
                 temp_path.replace(path)
     return revision
 
 
-def save_overall_preference(directory: Path, preference: str, *, revision: bytes | None = None) -> None:
+def save_overall_preference(
+    directory: Path, preference: str, *, revision: bytes | None = None,
+    baseline_snapshot: tuple[Path, bytes | None] | None = None, reviewed_preference: bytes | None = None,
+) -> None:
     """Update just the preference in the reviewed revision, including extended manifests."""
     path = directory / MANIFEST_FILENAME
     if revision is None:
         revision = path.read_bytes()
     data = yaml.safe_load(revision)
     data["overall_preference"] = preference
-    _write_manifest(path, data, revision)
+    _write_manifest(path, data, revision, baseline_snapshot=baseline_snapshot,
+                    reviewed_preference=reviewed_preference, judgment=True)
 
 
 def save_human_scores(directory: Path, update: dict[str, Any]) -> str:
@@ -143,7 +175,7 @@ def save_human_scores(directory: Path, update: dict[str, Any]) -> str:
         if "notes" in update:
             data["notes"] = update["notes"]
         try:
-            saved = _write_manifest(path, data, revision)
+            saved = _write_manifest(path, data, revision, judgment=bool(update.get("overall_preference")))
         except ManifestConflict:
             if "revision" in update:
                 raise

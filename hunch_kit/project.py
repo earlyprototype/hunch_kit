@@ -20,7 +20,7 @@ PROJECT_FILENAME = "hunch_project.yaml"
 
 class ImageMask(TypedDict):
     pixel_sha256: str
-    rectangle: list[int]
+    rectangle: list[int] | None
 
 
 @dataclass

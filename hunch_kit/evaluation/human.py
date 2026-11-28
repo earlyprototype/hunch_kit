@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import secrets
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import Literal
 
@@ -19,14 +20,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from yaml import YAMLError
 
 from ..manifest import (
-    MANIFEST_FILENAME, Manifest, ManifestConflict, load_all_manifests, reserve_outputs,
+    MANIFEST_FILENAME, Manifest, ManifestConflict, load_all_manifests, preference_revision, reserve_outputs,
     save_human_scores, save_overall_preference,
 )
 from ..project import ProjectConfig
 from ..rubric import Rubric, load_rubric_by_name
-from .blind import BlindPreviews, Fingerprint, UnverifiedAttribution, local_file
+from .blind import BlindPreviews, Fingerprint, UnverifiedAttribution, identifying_patterns, local_file
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -47,6 +49,7 @@ class BlindComparison:
     child_slot: str
     output_hashes: tuple[Fingerprint, ...] = ()
     initial_preference: str = ""
+    preference_revision: bytes = b""
     vote: str = ""
 
     def preference(self, vote: str) -> str:
@@ -81,7 +84,14 @@ def create_app(
 
     jinja_env = _create_jinja_env()
     comparisons: dict[str, BlindComparison] = {}
-    previews = BlindPreviews(ProjectConfig.load(Path(experiments_dir).parent).blind_image_masks)
+
+    @cache
+    def preview_store() -> BlindPreviews:
+        try:
+            config = ProjectConfig.load(Path(experiments_dir).parent)
+        except (OSError, ValueError, AttributeError, YAMLError) as exc:
+            raise ComparisonUnavailable(409, "The blind image mask configuration is unreadable.") from exc
+        return BlindPreviews(config.blind_image_masks)
 
     # Stash config on the app for route access
     app.state.experiments_dir = Path(experiments_dir)
@@ -200,19 +210,25 @@ def create_app(
             raise ComparisonUnavailable(404, "This comparison has expired. Start a new review.")
         return comparisons[key]
 
-    def check_outputs(comparison: BlindComparison) -> Manifest:
+    def check_outputs(comparison: BlindComparison) -> tuple[Manifest, Manifest]:
         child = comparison_manifest(comparison.child)
+        generation = preference_revision(app.state.experiments_dir / child.id)
         if child.baseline != comparison.baseline:
             raise ComparisonUnavailable(409, "The baseline changed. Start a new review.")
         baseline = comparison_manifest(comparison.baseline)
         if "running" in (child.status, baseline.status):
             raise ComparisonUnavailable(409, "An experiment is running. Review the outputs when it finishes.")
+        if {child.status, baseline.status}.intersection({"failed", "timeout"}):
+            raise ComparisonUnavailable(409, "An experiment failed or timed out. Run it again before voting.")
         ordered = (child, baseline) if comparison.child_slot == "A" else (baseline, child)
+        patterns = identifying_patterns(child, baseline)
+        previews = preview_store()
         try:
             hashes = tuple(
                 previews.read(
                     app.state.experiments_dir / manifest.id, manifest.output_path,
-                    attribution=_text_attribution(manifest),
+                    attribution=_text_attribution(manifest), patterns=patterns,
+                    declared_provider=manifest.provider,
                 )
                 for manifest in ordered
             )
@@ -223,11 +239,12 @@ def create_app(
         if not comparison.output_hashes:
             comparison.output_hashes = hashes
             comparison.initial_preference = child.overall_preference
+            comparison.preference_revision = generation
         elif comparison.output_hashes != hashes:
             raise ComparisonUnavailable(409, "An output changed. Start a new review.")
-        elif comparison.initial_preference != child.overall_preference:
+        elif comparison.initial_preference != child.overall_preference or comparison.preference_revision != generation:
             raise ComparisonUnavailable(409, "The recorded preference changed. Start a new review.")
-        return child
+        return child, baseline
 
     @app.get("/blind/{key}", response_class=HTMLResponse)
     async def blind_page(key: str) -> HTMLResponse:
@@ -235,7 +252,7 @@ def create_app(
         if not comparison.vote:
             check_outputs(comparison)
         outputs = {
-            slot: previews.recent.get(digest)
+            slot: preview_store().recent.get(digest)
             for slot, digest in zip(("A", "B"), comparison.output_hashes)
         }
         template = jinja_env.get_template("blind.html")
@@ -253,10 +270,12 @@ def create_app(
             directories = (comparison_directory(comparison.child), comparison_directory(comparison.baseline))
             try:
                 with reserve_outputs(*directories):
-                    child = check_outputs(comparison)
+                    child, baseline = check_outputs(comparison)
                     save_overall_preference(
                         app.state.experiments_dir / child.id, comparison.preference(vote),
                         revision=child.revision,
+                        baseline_snapshot=(directories[1] / MANIFEST_FILENAME, baseline.revision),
+                        reviewed_preference=comparison.preference_revision,
                     )
             except ManifestConflict as exc:
                 raise ComparisonUnavailable(409, str(exc)) from exc

@@ -13,8 +13,9 @@ from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
-from PIL import Image, ImageCms, ImageOps
+from PIL import Image, ImageCms, ImageOps, PngImagePlugin
 
+from ..manifest import Manifest
 from ..project import ImageMask
 
 
@@ -32,7 +33,7 @@ class Preview:
     content: str
 
 
-def _decode_pixels(raw: bytes) -> Image.Image:
+def _decode_pixels(raw: bytes) -> tuple[Image.Image, PngImagePlugin.PngInfo]:
     formats = ("PNG", "JPEG", "GIF", "WEBP")
     try:
         with Image.open(BytesIO(raw), formats=formats) as image:
@@ -51,6 +52,7 @@ def _decode_pixels(raw: bytes) -> Image.Image:
                     pixels.putalpha(Image.frombytes("L", gray.size, alpha))
             else:
                 pixels = oriented.convert("RGBA")
+            color_chunks = PngImagePlugin.PngInfo()
             if profile := image.info.get("icc_profile"):
                 if oriented.mode == "CMYK":
                     color = oriented
@@ -63,7 +65,15 @@ def _decode_pixels(raw: bytes) -> Image.Image:
                 )
                 srgb.putalpha(pixels.getchannel("A"))
                 pixels = srgb
-            return pixels
+            elif image.format == "PNG":
+                if "gamma" in image.info:
+                    color_chunks.add(b"gAMA", struct.pack(">I", round(image.info["gamma"] * 100000)))
+                if "chromaticity" in image.info:
+                    values = (round(v * 100000) for v in image.info["chromaticity"])
+                    color_chunks.add(b"cHRM", struct.pack(">8I", *values))
+                if "srgb" in image.info:
+                    color_chunks.add(b"sRGB", struct.pack("B", image.info["srgb"]))
+            return pixels, color_chunks
     except Exception as exc:
         # Pillow plugins use different exceptions for invalid headers and pixel data.
         raise ValueError("The image could not be decoded as a still preview.") from exc
@@ -75,7 +85,7 @@ def _pixel_digest(pixels: Image.Image) -> str:
     return digest.hexdigest()
 
 
-def _png_preview(pixels: Image.Image, mask: list[int] | None) -> str:
+def _png_preview(pixels: Image.Image, mask: list[int] | None, color_chunks: PngImagePlugin.PngInfo) -> str:
     if mask is not None:
         left, top, right, bottom = mask
         if not (0 <= left < right <= pixels.width and 0 <= top < bottom <= pixels.height):
@@ -83,14 +93,43 @@ def _png_preview(pixels: Image.Image, mask: list[int] | None) -> str:
         pixels.paste((240, 240, 240, 255), (left, top, right, bottom))
     pixels.info.clear()
     encoded = BytesIO()
-    pixels.save(encoded, format="PNG", compress_level=1)
+    pixels.save(encoded, format="PNG", compress_level=1, pnginfo=color_chunks)
     return "data:image/png;base64," + base64.b64encode(encoded.getbuffer()).decode("ascii")
 
 
-def _text_preview(raw: bytes, provider: str, prefix: str) -> str:
+def identifying_patterns(*manifests: Manifest) -> tuple[str, ...]:
+    """Match explicit identity and score labels belonging to either output."""
+    metadata_field = (r"provider|hypothesis|experiment[ _-]?id|baseline|"
+                      r"(?:human|automated)[ _-]scores|overall[ _-]preference|scores?")
+    patterns = {
+        rf"""\b(?:{metadata_field})["']?\s*[:=]""",
+        r"\b(?:score|rating)\s+(?:(?:is|was|of)\s+)?[-+]?\d",
+    }
+    for manifest in manifests:
+        labels = (manifest.id, manifest.hypothesis, manifest.provider,
+                  (manifest.provider_metadata or {}).get("provider"))
+        for label in labels:
+            if isinstance(label, str) and label.strip():
+                words = r"\s+".join(re.escape(word) for word in label.split())
+                patterns.add(rf"(?:^|[\W_]){words}(?=$|[\W_])")
+        for scores in (manifest.human_scores, manifest.automated_scores):
+            for dimension, value in (scores or {}).items():
+                words = r"[\s_-]+".join(re.escape(word) for word in re.split(r"[\s_-]+", str(dimension)))
+                score_label = r"(?:score|rating)\b|[:=]|(?:(?:was|is|of)\s+)?[-+]?\d"
+                patterns.add(rf"""\b{words}\b["']?\s*(?:{score_label})""")
+                if isinstance(value, (float, int, str)) and str(value):
+                    rating = re.escape(str(value))
+                    # Check each line once for the dimension and its recorded value in either order.
+                    patterns.add(rf"(?m)^(?=[^\n]*\b{words}\b)(?=[^\n]*(?<!\w){rating}(?!\w))")
+    return tuple(sorted(patterns))
+
+
+def _text_preview(raw: bytes, provider: str, prefix: str, patterns: tuple[str, ...]) -> str:
     text = raw.decode("utf-8").removeprefix(prefix)
-    if provider and re.search(rf"(?<!\w){re.escape(provider)}(?!\w)", text, re.IGNORECASE):
-        raise UnverifiedAttribution("The text still identifies its provider.")
+    if provider:
+        patterns = (*patterns, rf"(?<!\w){re.escape(provider)}(?!\w)")
+    if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
+        raise UnverifiedAttribution("The text contains identifying information or score labels.")
     return text
 
 
@@ -141,37 +180,47 @@ def local_file(directory: Path, name: str) -> Path:
     return current
 
 
+def _rectangle(value: object) -> list[int] | None:
+    if value is None:  # Explicitly verified clean at the configured pixel digest.
+        return None
+    if not isinstance(value, list) or len(value) != 4 or any(type(v) is not int for v in value):
+        raise UnverifiedAttribution("The blind image mask needs four integer coordinates.")
+    return value
+
+
 class BlindPreviews:
     """Share recent previews across refreshes and votes without retaining every ballot."""
 
     def __init__(self, image_masks: dict[str, ImageMask | list[int]] | None = None) -> None:
-        self.required_pixels: dict[str, str] = {}
-        self.pixel_masks: dict[str, list[int]] = {}
-        self.legacy_masks: dict[str, list[int]] = {}
-        for name, mask in (image_masks or {}).items():
-            if isinstance(mask, list):
-                self.legacy_masks[name] = mask
-            else:
-                digest = mask["pixel_sha256"]
-                self.required_pixels[name] = digest
-                self.pixel_masks[digest] = mask["rectangle"]
+        self.image_masks = image_masks if image_masks is not None else {}
         self.recent: OrderedDict[Fingerprint, Preview] = OrderedDict()
 
-    def _image_preview(self, raw: bytes, raw_hash: bytes, required: str | None) -> str:
-        pixels = _decode_pixels(raw)
-        mask = self.legacy_masks.get(raw_hash.hex())
-        if self.pixel_masks:
-            digest = _pixel_digest(pixels)
-            if required is not None and digest != required:
+    def _image_mask(self, name: str, pixels: Image.Image, raw_hash: bytes, required: bool) -> list[int] | None:
+        digest = _pixel_digest(pixels) if self.image_masks else ""
+        if name in self.image_masks:
+            rule = self.image_masks[name]
+            if not isinstance(rule, dict) or "rectangle" not in rule or not re.fullmatch(
+                r"[0-9a-f]{64}", str(rule.get("pixel_sha256", "")),
+            ):
+                raise UnverifiedAttribution("The blind image mask configuration is incomplete.")
+            if rule["pixel_sha256"] != digest:
                 raise UnverifiedAttribution("An image has changed since its mask was verified.")
-            mask = self.pixel_masks.get(digest, mask)
-        if (required is not None or self.legacy_masks) and mask is None:
-            # Encoded-file rules do not identify which experiment a miss belongs to.
+            return _rectangle(rule["rectangle"])
+
+        # Lossless copies can reuse a verified pixel rule under a different ID.
+        for rule in self.image_masks.values():
+            if isinstance(rule, dict) and rule.get("pixel_sha256") == digest and "rectangle" in rule:
+                return _rectangle(rule["rectangle"])
+        legacy = self.image_masks.get(raw_hash.hex())
+        if isinstance(legacy, list):
+            return _rectangle(legacy)
+        if required or any(re.fullmatch(r"[0-9a-f]{64}", str(key)) for key in self.image_masks):
             raise UnverifiedAttribution("A verified image mask is required.")
-        return _png_preview(pixels, mask)
+        return None
 
     def read(
         self, directory: Path, output_path: str, *, attribution: tuple[str, str] = ("", ""),
+        patterns: tuple[str, ...] = (), declared_provider: str = "",
     ) -> Fingerprint:
         path = local_file(directory, output_path)
         suffix = Path(output_path).suffix.lower()
@@ -186,19 +235,25 @@ class BlindPreviews:
         raw = path.read_bytes()
         if not raw:
             raise ValueError("Empty artifact.")
-        required = self.required_pixels.get(directory.name)
-        if required is not None and kind != "image":
+        if not isinstance(self.image_masks, dict):
+            raise UnverifiedAttribution("The blind image mask configuration must be a mapping.")
+        if directory.name in self.image_masks and kind != "image":
             raise UnverifiedAttribution("The designated output requires a verified image mask.")
         raw_hash = hashlib.sha256(raw).digest()
         # A cached preview must satisfy the same mask or attribution requirements.
-        key = (kind, raw_hash, (required or "",) if kind == "image" else attribution)
+        require_verified_image = "notebooklm" in {str(declared_provider).strip().casefold(),
+                                                  attribution[0].strip().casefold()}
+        policy = (directory.name, str(require_verified_image)) if kind == "image" else (*attribution, *patterns)
+        key = (kind, raw_hash, policy)
         if key in self.recent:
             self.recent.move_to_end(key)
         else:
             if kind == "image":
-                content = self._image_preview(raw, raw_hash, required)
+                pixels, color_chunks = _decode_pixels(raw)
+                mask = self._image_mask(directory.name, pixels, raw_hash, require_verified_image)
+                content = _png_preview(pixels, mask, color_chunks)
             else:
-                content = _text_preview(raw, *attribution)
+                content = _text_preview(raw, *attribution, patterns)
             self.recent[key] = Preview(kind, content)
             if len(self.recent) > 4:  # Two full A/B pairs. Completed votes retain their mapping.
                 self.recent.popitem(last=False)

@@ -141,10 +141,10 @@ async def test_review_images(campaign, monkeypatch, child_slot, vote, preference
 
 @pytest.fixture
 def text_pair(tmp_project):
-    for name, baseline in [("first", ""), ("second", "first")]:
+    for name, baseline, output in [("first", "", "Amber"), ("second", "first", "Blue")]:
         directory = tmp_project / "experiments" / name
         manifest_io.Manifest(id=name, baseline=baseline, output_path="result.txt").save(directory)
-        (directory / "result.txt").write_text(name.upper(), encoding="utf-8")
+        (directory / "result.txt").write_text(output, encoding="utf-8")
     return tmp_project
 
 
@@ -183,6 +183,86 @@ async def test_unrecognized_stub_attribution_withholds_ballot(text_pair):
         page = await client.get("/")
         assert page.status_code == 409
         assert "stub_local" not in page.text and not ReviewForm(page.text).votes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label", [
+    "SECOND", "first", "A simpler layout reads faster", "baseline_engine",
+    '"clarity": 7.25', "prior detail score of 8", "overall_preference: better",
+    "Previous score was 7.25", "Clarity (previous): 7.25",
+])
+async def test_text_ballot_checks_both_manifests(text_pair, label):
+    experiments = text_pair / "experiments"
+    baseline = manifest_io.Manifest.load(experiments / "first")
+    baseline.hypothesis = "A simpler layout reads faster"
+    baseline.provider = "baseline_engine"
+    baseline.human_scores = {"clarity": 7.25}
+    baseline.save(experiments / "first")
+    child = manifest_io.Manifest.load(experiments / "second")
+    child.provider = "echo"
+    child.automated_scores = {"detail": 8}
+    child.output_path = "result.yaml"
+    child.save(experiments / "second")
+    output = experiments / "second/result.yaml"
+    output.write_text("[echo] A simple design", encoding="utf-8")
+    async with client_for(text_pair, filter_id="second", blind=True) as client:
+        ballot = await client.get("/")
+        action = ReviewForm(ballot.text).votes["Tie"]
+        output.write_text("[echo] " + label, encoding="utf-8")
+        fresh = await client.get("/")
+        assert fresh.status_code == 409
+        assert label not in fresh.text and not ReviewForm(fresh.text).votes
+        assert (await client.post(action)).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_new_notebooklm_child_requires_verified_pixels(campaign):
+    experiments = campaign / "experiments"
+    directory = shutil.copytree(experiments / "dt_v3", experiments / "dt_v4")
+    child = manifest_io.Manifest.load(directory)
+    child.id, child.baseline = "dt_v4", "dt_v3"
+    child.save(directory)
+    image = directory / child.output_path
+    async with client_for(campaign, filter_id="dt_v4", blind=True) as client:
+        identical = await client.get("/")
+        assert identical.status_code == 200
+        with Image.open(image) as original:
+            pixels = original.convert("RGBA")
+        pixels.putpixel((0, 0), (255, 0, 255, 255))
+        pixels.save(image, compress_level=1)
+        fresh = await client.get("/")
+        assert fresh.status_code == 409 and not ReviewForm(fresh.text).images
+        assert (await client.post(ReviewForm(identical.text).votes["A"])).status_code == 409
+
+
+def test_verified_clean_image_requires_an_exact_pixel_match(tmp_path):
+    path = tmp_path / "clean.png"
+    Image.new("RGBA", (1, 1), "blue").save(path)
+    digest = hashlib.sha256(struct.pack(">II4B", 1, 1, 0, 0, 255, 255)).hexdigest()
+    previews = BlindPreviews({tmp_path.name: {"pixel_sha256": digest, "rectangle": None}})
+    key = previews.read(tmp_path, path.name, declared_provider="NotebookLM")
+    encoded = previews.recent[key].content.split(",", 1)[1]
+    with Image.open(BytesIO(base64.b64decode(encoded))) as preview:
+        assert preview.getpixel((0, 0)) == (0, 0, 255, 255)
+    Image.new("RGBA", (1, 1), "red").save(path)
+    with pytest.raises(ValueError, match="verified"):
+        previews.read(tmp_path, path.name, declared_provider="NotebookLM")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["pixel_sha256", "rectangle"])
+async def test_invalid_mask_is_local_to_affected_comparison(campaign, missing):
+    config = campaign / "hunch_project.yaml"
+    data = yaml.safe_load(config.read_bytes())
+    del data["blind_image_masks"]["dt_v3"][missing]
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+    async with client_for(campaign, filter_id="dt_v1") as client:
+        root = await client.get("/")
+        assert root.status_code == 200 and 'id="scoring-form"' in root.text
+        assert (await client.get("/blind?experiment_id=dt_v2")).status_code == 200
+        unavailable = await client.get("/blind?experiment_id=dt_v3")
+        assert unavailable.status_code == 409 and "mask" in unavailable.text.lower()
+        assert "dt_v3" not in unavailable.text and not ReviewForm(unavailable.text).votes
 
 
 @pytest.mark.asyncio
@@ -226,6 +306,80 @@ async def test_older_ballot_keeps_its_original_preference(text_pair):
         assert rejected.status_code == 409
         assert "second" not in rejected.text
         assert manifest_io.Manifest.load(text_pair / "experiments/second").overall_preference == "equivalent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_votes", [["Tie", "A"], ["A"]])
+async def test_old_ballot_expires_even_when_preference_is_unchanged(text_pair, monkeypatch, new_votes):
+    monkeypatch.setattr(secrets, "choice", lambda slots: "A")
+    directory = text_pair / "experiments/second"
+    manifest_io.save_overall_preference(directory, "better")
+    async with client_for(text_pair, filter_id="second", blind=True) as client:
+        old = await client.get("/")
+        for vote in new_votes:
+            # A separate evaluation server shares the campaign.
+            async with client_for(text_pair, filter_id="second", blind=True) as other:
+                new = await other.get("/")
+                assert (await other.post(ReviewForm(new.text).votes[vote])).status_code == 200
+        assert (await client.post(ReviewForm(old.text).votes["B"])).status_code == 409
+        assert manifest_io.Manifest.load(directory).overall_preference == "better"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("update", "vote_status"), [
+    ({"overall_preference": "better"}, 409), ({"notes": "Revised note"}, 200),
+])
+async def test_scoring_judgment_expires_ballot_and_notes_do_not(text_pair, update, vote_status):
+    directory = text_pair / "experiments/second"
+    manifest_io.save_overall_preference(directory, "better")
+    async with client_for(text_pair, filter_id="second", blind=True) as client:
+        page = await client.get("/")
+        assert (await client.post("/eval/second/score", json=update)).status_code == 200
+        assert (await client.post(ReviewForm(page.text).votes["Tie"])).status_code == vote_status
+
+
+@pytest.mark.asyncio
+async def test_baseline_edit_between_validation_and_commit(text_pair, monkeypatch):
+    baseline_dir = text_pair / "experiments/first"
+    (baseline_dir / "new.txt").write_text("Different design", encoding="utf-8")
+    serialize = manifest_io._manifest_yaml
+
+    def edit_baseline(data):
+        if data.get("overall_preference") == "equivalent":
+            baseline = manifest_io.Manifest.load(baseline_dir)
+            baseline.output_path = "new.txt"
+            baseline.save(baseline_dir)
+        return serialize(data)
+
+    async with client_for(text_pair, filter_id="second", blind=True) as client:
+        original = await client.get("/")
+        monkeypatch.setattr(manifest_io, "_manifest_yaml", edit_baseline)
+        assert (await client.post(ReviewForm(original.text).votes["Tie"])).status_code == 409
+        assert not manifest_io.Manifest.load(text_pair / "experiments/second").overall_preference
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("experiment", "status"), [("first", "failed"), ("second", "timeout")])
+async def test_unsuccessful_rerun_withholds_retained_output(text_pair, monkeypatch, experiment, status):
+    directory = text_pair / "experiments" / experiment
+    manifest = manifest_io.Manifest.load(directory)
+    manifest.input_path = "result.txt"
+    manifest.provider = "echo"
+    manifest.save(directory)
+    assert runner.run_experiment(directory).status == "success"
+
+    class Unsuccessful(BaseProvider):
+        def run(self, input_text, config=None):
+            return ProviderResult(output="", status=status)
+
+    async with client_for(text_pair, filter_id="second", blind=True) as client:
+        ballot = await client.get("/")
+        action = ReviewForm(ballot.text).votes["A"]
+        monkeypatch.setattr(runner, "resolve_provider", lambda *a, **kw: Unsuccessful())
+        assert runner.run_experiment(directory).status == status
+        assert (await client.get("/")).status_code == 409
+        assert (await client.post(action)).status_code == 409
+        assert not manifest_io.Manifest.load(text_pair / "experiments/second").overall_preference
 
 
 @pytest.mark.asyncio
@@ -281,13 +435,13 @@ def test_manifest_and_run_locks_leave_campaign_files_untouched(text_pair):
 async def test_review_shows_and_checks_text_endings(text_pair):
     experiments = text_pair / "experiments"
     prefix = "x" * 50_000
-    for name in ("first", "second"):
-        (experiments / name / "result.txt").write_text(prefix + name.upper(), encoding="utf-8")
+    for name, ending in [("first", "AMBER"), ("second", "BLUE")]:
+        (experiments / name / "result.txt").write_text(prefix + ending, encoding="utf-8")
     manifest = experiments / "second" / "experiment.yaml"
     before = manifest.read_bytes()
     async with client_for(text_pair, filter_id="second", blind=True) as client:
         page = await client.get("/")
-        assert prefix + "FIRST" in page.text and prefix + "SECOND" in page.text
+        assert prefix + "AMBER" in page.text and prefix + "BLUE" in page.text
         (experiments / "second" / "result.txt").write_text(prefix + "EDITED", encoding="utf-8")
         result = await client.post(ReviewForm(page.text).votes["Tie"])
         assert result.status_code == 409
@@ -338,7 +492,7 @@ async def test_reveal_survives_changed_output_after_submission(text_pair, monkey
         assert result.status_code == 200
         assert "A = first (baseline)" in result.text and "B = second (child)" in result.text
         assert "equivalent" in result.text and "replacement" not in result.text
-        assert "<pre>SECOND</pre>" in result.text
+        assert "<pre>Blue</pre>" in result.text
         assert not ReviewForm(result.text).votes
 
 
@@ -562,6 +716,21 @@ def test_grayscale_ramp_retains_tones(tmp_path):
     encoded = previews.recent[fingerprint].content.split(",", 1)[1]
     with Image.open(BytesIO(base64.b64decode(encoded))) as preview:
         assert list(preview.convert("L").getdata()) == [0, 4, 128, 233, 255]
+
+
+def test_png_preview_preserves_color_fields(tmp_path):
+    path = tmp_path / "linear.png"
+    info = PngImagePlugin.PngInfo()
+    info.add(b"gAMA", struct.pack(">I", 100000))
+    info.add(b"cHRM", struct.pack(">8I", 31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000))
+    info.add_text("Author", "Identifying name")
+    Image.new("RGB", (1, 1), (128, 128, 128)).save(path, pnginfo=info)
+    previews = BlindPreviews()
+    key = previews.read(tmp_path, path.name)
+    encoded = previews.recent[key].content.split(",", 1)[1]
+    with Image.open(BytesIO(base64.b64decode(encoded))) as preview, Image.open(path) as source:
+        assert preview.info == {key: source.info[key] for key in ("gamma", "chromaticity")}
+        assert preview.convert("RGB").getpixel((0, 0)) == (128, 128, 128)
 
 
 def test_cmyk_preview_applies_embedded_profile():

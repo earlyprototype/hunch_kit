@@ -45,9 +45,14 @@ displays the original images.
 In `hunch_project.yaml`, each `blind_image_masks` entry names an experiment,
 its verified pixel digest and a rectangle (`left, top, right, bottom`).
 The digest is SHA-256 over the width and height as two unsigned 32-bit
-big-endian integers followed by the oriented sRGB RGBA bytes in row order.
+big-endian integers followed by the oriented RGBA bytes in row order, after
+any embedded ICC profile has been applied.
 Lossless re-exports with the same pixels use the same mask. If a designated
 image changes, verify its pixels and rectangle before updating the entry.
+Every NotebookLM image needs a verified pixel rule or an exact match to a
+legacy mask, including images from new experiment IDs. For an image you have
+checked for visible attribution and found clean, set its verified pixel digest
+and use `rectangle: null`. Restart the evaluator after editing the configuration.
 Older configurations keyed by encoded-file SHA-256 require an exact match
 for every image on the ballot.
 
@@ -65,15 +70,20 @@ records `worse`, and a tie records `equivalent` in the child's
 `experiment.yaml`. The baseline manifest stays byte-identical.
 
 Blind review accepts still PNG, JPEG, GIF and WebP images. It applies embedded
-color profiles before removing metadata. For UTF-8 TXT, Markdown, YAML and JSON
-outputs, the preview omits a leading provider tag such as `[stub_local]`.
-If the text still names its provider, the ballot is unavailable.
+ICC profiles and preserves PNG gamma, chromaticity and sRGB fields when they
+describe the displayed pixels. For UTF-8 TXT, Markdown, YAML and JSON, the
+preview omits a recognized leading provider tag such as `[stub_local]`. The
+evaluator withholds text that identifies either experiment, names a provider,
+quotes a hypothesis or includes labeled scores.
 
-Voting pauses while either experiment is running. Local runners and voters
-under the same user account share locks in `~/.hunch-kit-locks`. The baseline
-can be read-only. If an output or the child's preference changes before
-submission, start a new review. Edits to notes are preserved. After a vote,
-the comparison URL shows the choice and mapping for the rest of the session.
+Voting pauses while either experiment is running. A failed or timed-out run
+must finish successfully before its retained output can be judged. Local
+runners and voters under the same user account share locks and preference
+revisions in `~/.hunch-kit-locks`. The baseline can be read-only. If an output
+changes or another reviewer records a preference, start a new review. This
+also applies when both reviewers choose the same option. Edits to notes are
+preserved. After a vote, the comparison URL shows the choice and mapping for
+the rest of the session.
 
 The ordinary scoring form checks its revision on save. Reload a stale form
 to see the latest preference. Score clients that omit the revision can still
