@@ -12,7 +12,9 @@
   <tbody>
     {% for m in manifests %}
     <tr>
-      <td><a href="/eval/{{ m.id }}">{{ m.id }}</a></td>
+      <td><a href="/eval/{{ m.id }}">{{ m.id }}</a>
+        {% if m.baseline %} · <a href="/blind?experiment_id={{ m.id | urlencode }}">Blind comparison</a>{% endif %}
+      </td>
       <td class="{{ status_classes.get(m.status, '') }}">{{ m.status }}</td>
       <td>{{ m.baseline or "—" }}</td>
       <td>{{ m.overall_preference or "—" }}</td>

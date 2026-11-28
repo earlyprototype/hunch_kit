@@ -10,12 +10,13 @@ import importlib.util
 import inspect
 import logging
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from .manifest import Manifest
+from .manifest import Manifest, mark_run_failed, reserve_outputs
 from .project import ProjectConfig, infer_campaign_root_from_experiment_dir, providers_dir
 from .providers.base import BaseProvider, ProviderResult
 
@@ -91,6 +92,26 @@ def resolve_provider(
     return cls()
 
 
+@contextmanager
+def _running_experiment(directory: Path, provider_override: str | None):
+    with reserve_outputs(directory):
+        manifest = Manifest.load(directory)
+        provider_name = provider_override or manifest.provider
+        if not provider_name:
+            raise ValueError(
+                f"Experiment {manifest.id!r} has no provider set and no override was given."
+            )
+        campaign_root = infer_campaign_root_from_experiment_dir(directory)
+        provider = resolve_provider(provider_name, campaign_root=campaign_root)
+        manifest.status = "running"
+        manifest.save(directory)
+        try:
+            yield manifest, provider
+        except BaseException:
+            mark_run_failed(directory)
+            raise
+
+
 def run_experiment(
     experiment_dir: Path,
     *,
@@ -108,41 +129,16 @@ def run_experiment(
         The ``ProviderResult`` from the provider execution.
     """
     experiment_dir = Path(experiment_dir)
-    manifest = Manifest.load(experiment_dir)
-    logger.info("Running experiment %r", manifest.id)
-
-    provider_name = provider_override or manifest.provider
-    if not provider_name:
-        raise ValueError(
-            f"Experiment {manifest.id!r} has no provider set and "
-            f"no override was given."
-        )
-
-    campaign_root = infer_campaign_root_from_experiment_dir(experiment_dir)
-    provider = resolve_provider(provider_name, campaign_root=campaign_root)
-
-    manifest.status = "running"
-    manifest.save(experiment_dir)
-
-    start = time.monotonic()
-    try:
-        input_text = _read_input(experiment_dir, manifest)
-        result = provider.run(input_text, manifest.provider_config or None)
-    except Exception as exc:
-        elapsed = time.monotonic() - start
-        logger.error(
-            "Experiment %r failed after %.1fs: %s",
-            manifest.id, elapsed, exc,
-        )
-        result = ProviderResult(
-            output="",
-            status="failed",
-            error=f"{type(exc).__name__}: {exc}",
-            duration_seconds=round(elapsed, 3),
-        )
-
-    _apply_result(manifest, result, experiment_dir)
-    manifest.save(experiment_dir)
+    with _running_experiment(experiment_dir, provider_override) as (manifest, provider):
+        logger.info("Running experiment %r", manifest.id)
+        start = time.monotonic()
+        try:
+            input_text = _read_input(experiment_dir, manifest)
+            result = provider.run(input_text, manifest.provider_config or None)
+        except Exception as exc:
+            logger.error("Experiment %r failed: %s", manifest.id, exc)
+            result = _failed_result(exc, start)
+        _save_result(manifest, result, experiment_dir)
     logger.info(
         "Experiment %r finished: status=%s duration=%.1fs",
         manifest.id, result.status,
@@ -158,37 +154,22 @@ async def run_experiment_async(
 ) -> ProviderResult:
     """Async variant of ``run_experiment``."""
     experiment_dir = Path(experiment_dir)
-    manifest = Manifest.load(experiment_dir)
-
-    provider_name = provider_override or manifest.provider
-    if not provider_name:
-        raise ValueError(
-            f"Experiment {manifest.id!r} has no provider set and "
-            f"no override was given."
-        )
-
-    campaign_root = infer_campaign_root_from_experiment_dir(experiment_dir)
-    provider = resolve_provider(provider_name, campaign_root=campaign_root)
-
-    manifest.status = "running"
-    manifest.save(experiment_dir)
-
-    start = time.monotonic()
-    try:
-        input_text = _read_input(experiment_dir, manifest)
-        result = await provider.async_run(input_text, manifest.provider_config or None)
-    except Exception as exc:
-        elapsed = time.monotonic() - start
-        result = ProviderResult(
-            output="",
-            status="failed",
-            error=f"{type(exc).__name__}: {exc}",
-            duration_seconds=round(elapsed, 3),
-        )
-
-    _apply_result(manifest, result, experiment_dir)
-    manifest.save(experiment_dir)
+    with _running_experiment(experiment_dir, provider_override) as (manifest, provider):
+        start = time.monotonic()
+        try:
+            input_text = _read_input(experiment_dir, manifest)
+            result = await provider.async_run(input_text, manifest.provider_config or None)
+        except Exception as exc:
+            result = _failed_result(exc, start)
+        _save_result(manifest, result, experiment_dir)
     return result
+
+
+def _failed_result(exc: Exception, start: float) -> ProviderResult:
+    return ProviderResult(
+        output="", status="failed", error=f"{type(exc).__name__}: {exc}",
+        duration_seconds=round(time.monotonic() - start, 3),
+    )
 
 
 def _read_input(experiment_dir: Path, manifest: Manifest) -> str:
@@ -208,7 +189,7 @@ def _read_input(experiment_dir: Path, manifest: Manifest) -> str:
     return input_path.read_text(encoding="utf-8")
 
 
-def _apply_result(
+def _save_result(
     manifest: Manifest,
     result: ProviderResult,
     experiment_dir: Path,
@@ -224,8 +205,5 @@ def _apply_result(
         )
 
     if result.output:
-        output_dir = experiment_dir / "output"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_file = output_dir / "result.txt"
-        output_file.write_text(result.output, encoding="utf-8")
-        manifest.output_path = str(output_file.relative_to(experiment_dir))
+        manifest.output_path = str(Path("output") / "result.txt")
+    manifest.save(experiment_dir, output_text=result.output or None)

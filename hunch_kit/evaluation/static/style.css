@@ -303,3 +303,5 @@ button[type="submit"]:hover { background: var(--accent-hover); }
 }
 
 .output-image { max-width: 100%; height: auto; display: block; border-radius: 6px; }
+
+.review-summary { margin-bottom: 1.5rem; }

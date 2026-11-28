@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Blind comparison</h1>
+{% if result %}
+<p class="review-summary" role="status">
+  You chose {{ result.vote }}. Recorded <strong>{{ result.preference(result.vote) }}</strong> for {{ result.child }}.
+  <a href="/eval/{{ result.child | urlencode }}">Open scored evaluation</a>
+</p>
+{% endif %}
+<div class="comparison">
+  {% for slot, output in outputs.items() %}
+  <section class="panel">
+    <h2>{{ slot }}{% if result %} = {{ result.child ~ ' (child)' if slot == result.child_slot else result.baseline ~ ' (baseline)' }}{% endif %}</h2>
+    <div class="output-box">
+      {% if output is none %}
+      <p>The reviewed preview has expired.</p>
+      {% elif output.kind == 'image' %}
+      <img class="output-image" alt="Output {{ slot }}" src="{{ output.content }}">
+      {% else %}
+      <pre>{{ output.content }}</pre>
+      {% endif %}
+    </div>
+  </section>
+  {% endfor %}
+</div>
+{% if not result %}
+<form method="post" class="scoring-section">
+  <h2>Which output do you prefer?</h2>
+  {% for choice in ("A", "B", "tie") %}
+  <button type="submit" formaction="/blind/{{ key }}/vote/{{ choice }}">{{ choice | capitalize }}</button>
+  {% endfor %}
+</form>
+{% endif %}
+{% endblock %}

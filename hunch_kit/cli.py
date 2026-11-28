@@ -243,11 +243,15 @@ def run(ctx: click.Context, experiment_id: str, provider: str | None) -> None:
 
 @cli.command()
 @click.argument("experiment_id", required=False)
+@click.option("--blind", is_flag=True, help="Compare a child's output with its baseline anonymously.")
 @click.option("--port", default=8888, help="Port for the evaluation server.")
 @click.option("--host", default="127.0.0.1", help="Host for the evaluation server.")
 @click.pass_context
-def eval(ctx: click.Context, experiment_id: str | None, port: int, host: str) -> None:
+def eval(ctx: click.Context, experiment_id: str | None, blind: bool, port: int, host: str) -> None:
     """Launch the evaluation web UI."""
+    if blind and not experiment_id:
+        raise click.UsageError("--blind requires a child experiment ID.")
+
     from .evaluation.human import create_app
     import uvicorn
 
@@ -256,10 +260,11 @@ def eval(ctx: click.Context, experiment_id: str | None, port: int, host: str) ->
         experiments_dir=root / "experiments",
         rubrics_dir=root / "rubrics",
         filter_id=experiment_id,
+        blind=blind,
     )
 
     click.echo(f"Evaluation UI: http://{host}:{port}")
-    if experiment_id:
+    if experiment_id and not blind:
         click.echo(f"Filtered to experiment: {experiment_id}")
     click.echo("Press Ctrl+C to stop.\n")
 

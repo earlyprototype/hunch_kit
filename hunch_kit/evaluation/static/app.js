@@ -1,6 +1,8 @@
 document.addEventListener("DOMContentLoaded", () => {
   const form = document.getElementById("scoring-form");
   if (!form) return;
+  const preferenceField = form.querySelector("#overall_preference");
+  let savedPreference = preferenceField?.value || "";
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -13,7 +15,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (el.name) scores[el.name] = el.value;
     });
 
-    const preference = form.querySelector("#overall_preference")?.value || "";
+    const preference = preferenceField?.value || "";
     const notes = form.querySelector("#notes")?.value || "";
 
     status.textContent = "Saving...";
@@ -24,13 +26,16 @@ document.addEventListener("DOMContentLoaded", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          revision: form.dataset.revision,
           scores,
-          overall_preference: preference,
+          overall_preference: preference === savedPreference ? undefined : preference,
           notes,
         }),
       });
 
       if (res.ok) {
+        form.dataset.revision = (await res.json()).revision;
+        savedPreference = preference;
         status.textContent = "Saved";
         status.style.color = "#16a34a";
       } else {

@@ -7,6 +7,7 @@
   <span><strong>Hypothesis:</strong> {{ manifest.hypothesis }}</span>
   <span><strong>Variable:</strong> {{ manifest.variable_changed }} = {{ manifest.variable_value }}</span>
   <span><strong>Status:</strong> {{ manifest.status }}</span>
+  {% if manifest.baseline %}<a href="/blind?experiment_id={{ experiment_id | urlencode }}">Blind comparison</a>{% endif %}
 </div>
 
 <div class="comparison">
@@ -49,7 +50,7 @@
 <div class="scoring-section{% if current_input %} has-prompt{% endif %}">
   <div class="scoring-main">
   <h2>Scoring</h2>
-  <form id="scoring-form" data-experiment-id="{{ experiment_id }}">
+  <form id="scoring-form" data-experiment-id="{{ experiment_id }}" data-revision="{{ manifest.revision_token }}">
 
     {# Rubric dimensions #}
     {% if dimensions %}

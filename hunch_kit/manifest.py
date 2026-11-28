@@ -6,21 +6,197 @@ experiment: hypothesis, variables, lineage, provider metadata, and scores.
 
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, asdict
 from datetime import date
+import hashlib
 import logging
+import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
+from filelock import FileLock, Timeout
+
+from ._file_permissions import prepare_replacement
 
 logger = logging.getLogger(__name__)
 
 
 SCHEMA_VERSION = "1"
 MANIFEST_FILENAME = "experiment.yaml"
+LOCK_DIRECTORY = Path.home() / ".hunch-kit-locks"
 
 REQUIRED_FIELDS = ("id", "hypothesis", "variable_changed", "variable_value")
+
+
+def _manifest_yaml(data: dict[str, Any]) -> str:
+    return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+class ManifestConflict(RuntimeError):
+    """The manifest changed since this writer read it."""
+
+
+def _local_state_path(directory: Path, suffix: str) -> Path:
+    """Share locks and ballot revisions between local processes."""
+    LOCK_DIRECTORY.mkdir(mode=0o700, exist_ok=True)
+    canonical = os.path.normcase(str(directory.resolve()))
+    key = hashlib.sha256(os.fsencode(canonical)).hexdigest()
+    return LOCK_DIRECTORY / f"{key}.{suffix}"
+
+
+@contextmanager
+def reserve_outputs(*directories: Path):
+    """Exclude runs while a ballot commits, and overlapping runs on the same output."""
+    with ExitStack() as locks:
+        for path in sorted({_local_state_path(directory, "run.lock") for directory in directories}):
+            try:
+                locks.enter_context(FileLock(path, timeout=0))
+            except Timeout as exc:
+                raise ManifestConflict("An output is in use. Retry when the operation finishes.") from exc
+        yield
+
+
+def _current_revision(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def preference_revision(directory: Path) -> bytes:
+    """Local ballot generation shared by evaluators of this campaign."""
+    return _current_revision(_local_state_path(directory, "preference.rev")) or b""
+
+
+@contextmanager
+def _publish_output(path: Path, text: str):
+    """Install a complete result and restore its predecessor if the manifest commit fails."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=path.parent) as staging:
+        new = Path(staging) / "new"
+        old = Path(staging) / "old"
+        if path.exists():
+            prepare_replacement(path, new)
+            prepare_replacement(path, old)
+            shutil.copy2(path, old)
+        new.write_text(text, encoding="utf-8")
+        new.replace(path)
+        try:
+            yield
+        except BaseException:
+            if old.exists():
+                old.replace(path)
+            else:
+                path.unlink()
+            raise
+
+
+def _write_manifest(
+    path: Path, data: dict[str, Any], expected: bytes | None, *, output_text: str | None = None,
+    baseline_snapshot: tuple[Path, bytes | None] | None = None,
+    reviewed_preference: bytes | None = None, judgment: bool = False,
+) -> bytes:
+    revision = _manifest_yaml(data).encode("utf-8")
+    with tempfile.TemporaryDirectory(dir=path.parent) as staging:
+        # Normal file creation applies the caller's umask. The staging directory is private.
+        temp_path = Path(staging) / "manifest.tmp"
+        # A separate lock stays valid when the YAML file is atomically replaced.
+        snapshots = {path: expected}
+        if baseline_snapshot is not None:
+            baseline_path, baseline_bytes = baseline_snapshot
+            snapshots[baseline_path] = baseline_bytes
+        with ExitStack() as locks:
+            for lock in sorted({_local_state_path(p.parent, "manifest.lock") for p in snapshots}):
+                locks.enter_context(FileLock(lock))
+            if any(_current_revision(p) != snapshot for p, snapshot in snapshots.items()):
+                raise ManifestConflict("The manifest changed. Reload it and retry.")
+            if reviewed_preference is not None and preference_revision(path.parent) != reviewed_preference:
+                raise ManifestConflict("The recorded preference changed. Start a new review.")
+            if expected is not None:
+                prepare_replacement(path, temp_path)
+            temp_path.write_bytes(revision)
+            output = nullcontext() if output_text is None else _publish_output(
+                path.parent / data["output_path"], output_text,
+            )
+            with output:
+                previous = (yaml.safe_load(expected) or {}) if expected else {}
+                if judgment or data.get("overall_preference", "") != previous.get("overall_preference", ""):
+                    # Invalidate open ballots before publishing, even for a repeat judgment.
+                    # A failed publication can expire a ballot, but cannot revive a stale one.
+                    marker = _local_state_path(path.parent, "preference.rev")
+                    with tempfile.TemporaryDirectory(dir=marker.parent) as state_staging:
+                        update = Path(state_staging) / "revision"
+                        update.write_bytes(uuid4().bytes)
+                        update.replace(marker)
+                temp_path.replace(path)
+    return revision
+
+
+def save_overall_preference(
+    directory: Path, preference: str, *, revision: bytes | None = None,
+    baseline_snapshot: tuple[Path, bytes | None] | None = None, reviewed_preference: bytes | None = None,
+) -> None:
+    """Update just the preference in the reviewed revision, including extended manifests."""
+    path = directory / MANIFEST_FILENAME
+    if revision is None:
+        revision = path.read_bytes()
+    data = yaml.safe_load(revision)
+    data["overall_preference"] = preference
+    _write_manifest(path, data, revision, baseline_snapshot=baseline_snapshot,
+                    reviewed_preference=reviewed_preference, judgment=True)
+
+
+def save_human_scores(directory: Path, update: dict[str, Any]) -> str:
+    """Merge supplied scoring fields and return the saved revision token."""
+    path = directory / MANIFEST_FILENAME
+    scores = {}
+    for name, value in update.get("scores", {}).items():
+        try:
+            scores[name] = float(value)
+        except (TypeError, ValueError):
+            scores[name] = value
+
+    while True:
+        revision = path.read_bytes()
+        data = yaml.safe_load(revision)
+        if data.get("status") == "running" or (
+            "revision" in update and update["revision"] != hashlib.sha256(revision).hexdigest()
+        ):
+            raise ManifestConflict("Reload the scoring form after the latest change.")
+        if scores:
+            data.setdefault("human_scores", {}).update(scores)
+        if update.get("overall_preference"):
+            data["overall_preference"] = update["overall_preference"]
+        if "notes" in update:
+            data["notes"] = update["notes"]
+        try:
+            saved = _write_manifest(path, data, revision, judgment=bool(update.get("overall_preference")))
+        except ManifestConflict:
+            if "revision" in update:
+                raise
+            continue
+        return hashlib.sha256(saved).hexdigest()
+
+
+def mark_run_failed(directory: Path) -> None:
+    """End the reserved run while preserving edits to the current manifest."""
+    path = directory / MANIFEST_FILENAME
+    while True:
+        revision = path.read_bytes()
+        data = yaml.safe_load(revision)
+        if data.get("status") != "running":
+            return
+        data["status"] = "failed"
+        try:
+            _write_manifest(path, data, revision)
+            return
+        except ManifestConflict:
+            continue
 
 
 @dataclass
@@ -62,6 +238,15 @@ class Manifest:
 
     notes: str = ""
 
+    def __post_init__(self) -> None:
+        # File state is separate from the fields serialized to experiment.yaml.
+        self._source_path: Path | None = None
+        self.revision: bytes | None = None
+
+    @property
+    def revision_token(self) -> str:
+        return hashlib.sha256(self.revision).hexdigest() if self.revision is not None else ""
+
     # -- Validation ----------------------------------------------------------
 
     def validate(self) -> list[str]:
@@ -83,20 +268,15 @@ class Manifest:
         """Convert to a plain dict suitable for YAML output."""
         return {k: v for k, v in asdict(self).items() if v or v == 0}
 
-    def save(self, directory: Path) -> Path:
-        """Write the manifest to *directory*/experiment.yaml."""
+    def save(self, directory: Path, *, output_text: str | None = None) -> Path:
+        """Commit the manifest and any runner output against the loaded revision."""
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / MANIFEST_FILENAME
-        path.write_text(
-            yaml.dump(
-                self.to_dict(),
-                default_flow_style=False,
-                sort_keys=False,
-                allow_unicode=True,
-            ),
-            encoding="utf-8",
-        )
+        target = path.resolve()
+        expected = self.revision if self._source_path == target else _current_revision(path)
+        self.revision = _write_manifest(path, self.to_dict(), expected, output_text=output_text)
+        self._source_path = target
         logger.debug("Saved manifest %r to %s", self.id, path)
         return path
 
@@ -108,8 +288,11 @@ class Manifest:
         path = Path(path)
         if path.is_dir():
             path = path / MANIFEST_FILENAME
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        revision = path.read_bytes()
+        data = yaml.safe_load(revision) or {}
         manifest = cls._from_dict(data)
+        manifest._source_path = path.resolve()
+        manifest.revision = revision
         logger.debug("Loaded manifest %r from %s", manifest.id, path)
         return manifest
 

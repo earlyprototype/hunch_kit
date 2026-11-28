@@ -8,8 +8,9 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+import yaml
 
-from hunch_kit.manifest import Manifest
+from hunch_kit.manifest import Manifest, ManifestConflict
 from hunch_kit.providers.base import BaseProvider, ProviderResult
 from hunch_kit.runner import run_experiment, run_experiment_async
 
@@ -137,3 +138,56 @@ class TestSuccessfulRun:
         result = run_experiment(experiment_dir)
         assert result.status == "success"
         assert len(result.output) > 0
+
+
+@pytest.mark.parametrize("entry", ["sync", "async"])
+def test_conflict_during_rerun_preserves_published_output(experiment_dir, entry):
+    run_experiment(experiment_dir)
+    original = Manifest.load(experiment_dir)
+    artifact = experiment_dir / original.output_path
+    before = artifact.read_bytes()
+
+    class EditingProvider(BaseProvider):
+        def run(self, input_text, config=None):
+            edit = Manifest.load(experiment_dir)
+            edit.notes = "Edited during provider execution"
+            edit.save(experiment_dir)
+            return ProviderResult(output="A different result")
+
+    with patch("hunch_kit.runner.resolve_provider", return_value=EditingProvider()):
+        with pytest.raises(ManifestConflict):
+            if entry == "sync":
+                run_experiment(experiment_dir)
+            else:
+                asyncio.run(run_experiment_async(experiment_dir))
+    saved = Manifest.load(experiment_dir)
+    assert saved.status == "failed"
+    assert saved.notes == "Edited during provider execution"
+    assert saved.output_path == original.output_path
+    assert artifact.read_bytes() == before
+    assert list(artifact.parent.iterdir()) == [artifact]
+
+
+@pytest.mark.parametrize("has_previous_output", [False, True])
+def test_failed_manifest_replace_rolls_back_artifact(experiment_dir, monkeypatch, has_previous_output):
+    artifact = experiment_dir / "output/result.txt"
+    if has_previous_output:
+        run_experiment(experiment_dir)
+    previous = Manifest.load(experiment_dir)
+    (experiment_dir / "input.txt").write_text("replacement", encoding="utf-8")
+    replace = Path.replace
+
+    def fail_terminal_commit(staged, target):
+        if target.name == "experiment.yaml" and yaml.safe_load(staged.read_bytes())["status"] == "success":
+            raise OSError("Could not replace the manifest")
+        return replace(staged, target)
+
+    monkeypatch.setattr(Path, "replace", fail_terminal_commit)
+    with pytest.raises(OSError, match="replace the manifest"):
+        run_experiment(experiment_dir)
+    saved = Manifest.load(experiment_dir)
+    assert saved.status == "failed" and saved.output_path == previous.output_path
+    if has_previous_output:
+        assert artifact.read_bytes() == b"hello"
+    else:
+        assert not artifact.exists()

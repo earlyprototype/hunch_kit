@@ -21,7 +21,7 @@ holds the exact fuji prompt used. Open the eval UI to see baseline-vs-current
 side by side with the prompt and the hand scores:
 
 ```bash
-hunch eval --project examples/design_thinking dt_v3
+hunch --root examples/design_thinking eval dt_v3
 ```
 
 ## Why the title broke, and how one change fixed it
@@ -33,6 +33,64 @@ headline — the single riskiest place for letterform corruption. Constraining
 headings to plain sans-serif with an explicit spelling rule (`dt_v3`) removed
 the corruption source. That is the whole point of the tool: a human caught the
 flaw, changed **one** thing, and verified the improvement.
+
+## Blind review
+
+From the repository root, start the reviewer on a disposable copy of the campaign.
+The UI reads the two checked-in PNGs for `dt_v3` and its baseline, `dt_v2`.
+The preview covers the printed provider mark in the lower right corner.
+All other pixels in these PNGs match the source. The ordinary scoring page
+displays the original images.
+
+In `hunch_project.yaml`, each `blind_image_masks` entry names an experiment,
+its verified pixel digest and a rectangle (`left, top, right, bottom`).
+The digest is SHA-256 over the width and height as two unsigned 32-bit
+big-endian integers followed by the oriented RGBA bytes in row order, after
+any embedded ICC profile has been applied.
+Lossless re-exports with the same pixels use the same mask. If a designated
+image changes, verify its pixels and rectangle before updating the entry.
+Every NotebookLM image needs a verified pixel rule or an exact match to a
+legacy mask, including images from new experiment IDs. For an image you have
+checked for visible attribution and found clean, set its verified pixel digest
+and use `rectangle: null`. Restart the evaluator after editing the configuration.
+Older configurations keyed by encoded-file SHA-256 require an exact match
+for every image on the ballot.
+
+```bash
+demo=$(mktemp -d)
+cp -R examples/design_thinking "$demo/campaign"
+hunch --root "$demo/campaign" eval --blind dt_v3
+```
+
+Open `http://127.0.0.1:8888/`. Each new review assigns the images to A and B
+at random. Refreshing the comparison URL keeps that assignment while the
+server is running. Select **A**, **B** or **Tie** to record the choice and reveal
+both experiment IDs. Choosing the child records `better`, choosing the baseline
+records `worse`, and a tie records `equivalent` in the child's
+`experiment.yaml`. The baseline manifest stays byte-identical.
+
+Blind review accepts still PNG, JPEG, GIF and WebP images. It applies embedded
+ICC profiles and preserves PNG gamma, chromaticity and sRGB fields when they
+describe the displayed pixels. For UTF-8 TXT, Markdown, YAML and JSON, the
+preview omits a recognized leading provider tag such as `[stub_local]`. The
+evaluator withholds text that identifies either experiment, names a provider,
+quotes a hypothesis or includes labeled scores.
+
+Voting pauses while either experiment is running. A failed or timed-out run
+must finish successfully before its retained output can be judged. Local
+runners and voters under the same user account share locks and preference
+revisions in `~/.hunch-kit-locks`. The baseline can be read-only. If an output
+changes or another reviewer records a preference, start a new review. This
+also applies when both reviewers choose the same option. Edits to notes are
+preserved. After a vote, the comparison URL shows the choice and mapping for
+the rest of the session.
+
+The ordinary scoring form checks its revision on save. Reload a stale form
+to see the latest preference. Score clients that omit the revision can still
+update individual scores.
+
+The ordinary experiment list also offers **Blind comparison** for children.
+For the root's rubric and scores, open `/eval/dt_v1`.
 
 ## Reproducing (NotebookLM)
 
