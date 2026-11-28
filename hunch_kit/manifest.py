@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from filelock import FileLock
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +30,44 @@ def _manifest_yaml(data: dict[str, Any]) -> str:
     return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
-def save_overall_preference(directory: Path, preference: str) -> None:
-    """Update just the preference in the existing YAML, including older or extended manifests."""
-    path = directory / MANIFEST_FILENAME
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    data["overall_preference"] = preference
-    temp = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False)
+class ManifestConflict(RuntimeError):
+    """The manifest changed since this writer read it."""
+
+
+def _current_revision(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _write_manifest(path: Path, data: dict[str, Any], expected: bytes | None) -> bytes:
+    revision = _manifest_yaml(data).encode("utf-8")
+    temp = tempfile.NamedTemporaryFile(dir=path.parent, delete=False)
     temp_path = Path(temp.name)
     try:
         with temp:
-            temp.write(_manifest_yaml(data))
-        shutil.copymode(path, temp_path)
-        temp_path.replace(path)
+            temp.write(revision)
+        # A separate lock stays valid when the YAML file is atomically replaced.
+        with FileLock(path.with_name(".experiment.yaml.lock")):
+            if _current_revision(path) != expected:
+                raise ManifestConflict("The manifest changed. Reload it and retry.")
+            if expected is not None:
+                shutil.copymode(path, temp_path)
+            temp_path.replace(path)
     finally:
         temp_path.unlink(missing_ok=True)
+    return revision
+
+
+def save_overall_preference(directory: Path, preference: str, *, revision: bytes | None = None) -> None:
+    """Update just the preference in the reviewed revision, including extended manifests."""
+    path = directory / MANIFEST_FILENAME
+    if revision is None:
+        revision = path.read_bytes()
+    data = yaml.safe_load(revision)
+    data["overall_preference"] = preference
+    _write_manifest(path, data, revision)
 
 
 @dataclass
@@ -84,6 +109,11 @@ class Manifest:
 
     notes: str = ""
 
+    def __post_init__(self) -> None:
+        # File state is separate from the fields serialized to experiment.yaml.
+        self._source_path: Path | None = None
+        self.revision: bytes | None = None
+
     # -- Validation ----------------------------------------------------------
 
     def validate(self) -> list[str]:
@@ -110,7 +140,10 @@ class Manifest:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / MANIFEST_FILENAME
-        path.write_text(_manifest_yaml(self.to_dict()), encoding="utf-8")
+        target = path.resolve()
+        expected = self.revision if self._source_path == target else _current_revision(path)
+        self.revision = _write_manifest(path, self.to_dict(), expected)
+        self._source_path = target
         logger.debug("Saved manifest %r to %s", self.id, path)
         return path
 
@@ -122,8 +155,11 @@ class Manifest:
         path = Path(path)
         if path.is_dir():
             path = path / MANIFEST_FILENAME
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        revision = path.read_bytes()
+        data = yaml.safe_load(revision) or {}
         manifest = cls._from_dict(data)
+        manifest._source_path = path.resolve()
+        manifest.revision = revision
         logger.debug("Loaded manifest %r from %s", manifest.id, path)
         return manifest
 

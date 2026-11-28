@@ -13,10 +13,12 @@
   <section class="panel">
     <h2>{{ slot }}{% if result %} = {{ result.child ~ ' (child)' if slot == result.child_slot else result.baseline ~ ' (baseline)' }}{% endif %}</h2>
     <div class="output-box">
-      {% if output.startswith('data:image') %}
-      <img class="output-image" alt="Output {{ slot }}" src="{{ output }}">
+      {% if output is none %}
+      <p>The reviewed preview has expired.</p>
+      {% elif output.kind == 'image' %}
+      <img class="output-image" alt="Output {{ slot }}" src="{{ output.content }}">
       {% else %}
-      <pre>{{ output }}</pre>
+      <pre>{{ output.content }}</pre>
       {% endif %}
     </div>
   </section>

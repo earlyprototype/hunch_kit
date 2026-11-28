@@ -7,7 +7,6 @@ rubric dimensions.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import secrets
 from dataclasses import dataclass
@@ -21,8 +20,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from ..manifest import MANIFEST_FILENAME, Manifest, load_all_manifests, save_overall_preference
+from ..manifest import (
+    MANIFEST_FILENAME, Manifest, ManifestConflict, load_all_manifests, save_overall_preference,
+)
 from ..rubric import Rubric, load_rubric_by_name
+from .blind import BlindPreviews, Fingerprint
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -41,7 +43,7 @@ class BlindComparison:
     child: str
     baseline: str
     child_slot: str
-    output_hashes: tuple[bytes, ...] = ()
+    output_hashes: tuple[Fingerprint, ...] = ()
     vote: str = ""
 
     def preference(self, vote: str) -> str:
@@ -76,6 +78,7 @@ def create_app(
 
     jinja_env = _create_jinja_env()
     comparisons: dict[str, BlindComparison] = {}
+    previews = BlindPreviews()
 
     # Stash config on the app for route access
     app.state.experiments_dir = Path(experiments_dir)
@@ -189,28 +192,33 @@ def create_app(
             raise ComparisonUnavailable(404, "This comparison has expired. Start a new review.")
         return comparisons[key]
 
-    def comparison_outputs(comparison: BlindComparison) -> dict[str, str]:
+    def check_outputs(comparison: BlindComparison) -> Manifest:
         child = comparison_manifest(comparison.child)
         if child.baseline != comparison.baseline:
             raise ComparisonUnavailable(409, "The baseline changed. Start a new review.")
         baseline = comparison_manifest(comparison.baseline)
         ordered = (child, baseline) if comparison.child_slot == "A" else (baseline, child)
-        outputs = {}
-        for slot, manifest in zip(("A", "B"), ordered):
-            output = _read_output(app.state.experiments_dir / manifest.id, manifest, blind=True)
-            if not output:
-                raise ComparisonUnavailable(409, "Both experiments need a readable text or image output.")
-            outputs[slot] = output
-        hashes = tuple(hashlib.sha256(output.encode()).digest() for output in outputs.values())
+        try:
+            hashes = tuple(
+                previews.read(app.state.experiments_dir / manifest.id, manifest.output_path)
+                for manifest in ordered
+            )
+        except (OSError, ValueError) as exc:
+            raise ComparisonUnavailable(409, "Both experiments need readable text or a still image.") from exc
         if comparison.output_hashes and comparison.output_hashes != hashes:
             raise ComparisonUnavailable(409, "An output changed. Start a new review.")
         comparison.output_hashes = hashes
-        return outputs
+        return child
 
     @app.get("/blind/{key}", response_class=HTMLResponse)
     async def blind_page(key: str) -> HTMLResponse:
         comparison = get_comparison(key)
-        outputs = comparison_outputs(comparison)
+        if not comparison.vote:
+            check_outputs(comparison)
+        outputs = {
+            slot: previews.recent.get(digest)
+            for slot, digest in zip(("A", "B"), comparison.output_hashes)
+        }
         template = jinja_env.get_template("blind.html")
         return HTMLResponse(template.render(
             title="Blind comparison", outputs=outputs, key=key,
@@ -223,10 +231,14 @@ def create_app(
         if not comparison.vote:
             if not comparison.output_hashes:
                 raise ComparisonUnavailable(409, "View both outputs before choosing.")
-            comparison_outputs(comparison)
-            save_overall_preference(
-                app.state.experiments_dir / comparison.child, comparison.preference(vote)
-            )
+            child = check_outputs(comparison)
+            try:
+                save_overall_preference(
+                    app.state.experiments_dir / child.id, comparison.preference(vote),
+                    revision=child.revision,
+                )
+            except ManifestConflict as exc:
+                raise ComparisonUnavailable(409, str(exc)) from exc
             comparison.vote = vote
         return RedirectResponse(f"/blind/{key}", status_code=303)
 
@@ -251,7 +263,10 @@ def create_app(
         if "notes" in data:
             manifest.notes = data["notes"]
 
-        manifest.save(exp_dir)
+        try:
+            manifest.save(exp_dir)
+        except ManifestConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
         return JSONResponse({"status": "saved", "experiment_id": experiment_id})
 
     return app
@@ -279,12 +294,10 @@ def _read_input(exp_dir: Path, manifest: Manifest) -> str:
         return ""
 
 
-def _read_output(exp_dir: Path, manifest: Manifest, *, blind: bool = False) -> str:
+def _read_output(exp_dir: Path, manifest: Manifest) -> str:
     if not manifest.output_path:
         return ""
     output_path = exp_dir / manifest.output_path
-    if blind and not output_path.resolve().is_relative_to(exp_dir.resolve()):
-        return ""
     if not output_path.is_file():
         return ""
     suffix = output_path.suffix.lower()
@@ -293,22 +306,15 @@ def _read_output(exp_dir: Path, manifest: Manifest, *, blind: bool = False) -> s
         import mimetypes
 
         mime = mimetypes.guess_type(str(output_path))[0] or "image/png"
-        try:
-            image = output_path.read_bytes()
-        except OSError:
-            if blind:
-                return ""
-            raise
-        if blind and not image:
-            return ""
+        image = output_path.read_bytes()
         encoded = base64.b64encode(image).decode("ascii")
         return f"data:{mime};base64,{encoded}"
     if suffix in (".txt", ".md", ".yaml", ".yml", ".json"):
         try:
             return output_path.read_text(encoding="utf-8")[:50_000]
         except Exception:
-            return "" if blind else f"[Could not read: {output_path.name}]"
-    return "" if blind else f"[Binary file: {output_path.name} — open externally]"
+            return f"[Could not read: {output_path.name}]"
+    return f"[Binary file: {output_path.name} — open externally]"
 
 
 def _format_meta(manifest: Manifest) -> str:

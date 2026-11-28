@@ -38,6 +38,8 @@ flaw, changed **one** thing, and verified the improvement.
 
 From the repository root, start the reviewer on a disposable copy of the campaign.
 The UI reads the two checked-in PNGs for `dt_v3` and its baseline, `dt_v2`.
+It decodes the pixels locally and serves PNG previews without embedded provider
+metadata. The source images stay intact.
 
 ```bash
 demo=$(mktemp -d)
@@ -51,6 +53,11 @@ server is running. Select **A**, **B** or **Tie** to record the choice and revea
 both experiment IDs. Choosing the child records `better`, choosing the baseline
 records `worse`, and a tie records `equivalent` in the child's
 `experiment.yaml`. The baseline manifest stays byte-identical.
+
+Blind review accepts still PNG, JPEG, GIF and WebP images and displays the full
+text of UTF-8 TXT, Markdown, YAML and JSON files. If either output changes
+before submission, start a new review. After a vote, the comparison URL shows
+the recorded choice and mapping for the rest of the server session.
 
 The ordinary experiment list also offers **Blind comparison** for children.
 For the root's rubric and scores, open `/eval/dt_v1`.
